@@ -5,19 +5,20 @@ import path from "node:path";
 import process from "node:process";
 import readline from "node:readline";
 import { once } from "node:events";
+import { fileURLToPath } from "node:url";
 import {
   Encoding,
   RpcClient,
   ScriptPublicKey,
   addressFromScriptPublicKey,
   initSync
-} from "../node_modules/@onekeyfe/kaspa-wasm/kaspa.js";
+} from "@onekeyfe/kaspa-wasm/kaspa.js";
 
 const DEPTH = 20;
 const CAPACITY = 1 << DEPTH;
 const RECORD_BYTES = 64;
 const ZERO32 = Buffer.alloc(32);
-const appRoot = path.resolve(import.meta.dirname, "..");
+const appRoot = import.meta.dirname;
 const dataDir = path.resolve(process.env.RAFFLE_INDEX_DATA || path.join(appRoot, ".index-data"));
 const statePath = path.join(dataDir, "state.json");
 const eventLogPath = path.join(dataDir, "events.ndjson");
@@ -32,7 +33,8 @@ const pollMs = Number(process.env.RAFFLE_INDEX_POLL_MS || 1_000);
 const offline = process.env.RAFFLE_INDEX_OFFLINE === "1";
 
 fs.mkdirSync(dataDir, { recursive: true });
-initSync({ module: fs.readFileSync(path.join(appRoot, "node_modules/@onekeyfe/kaspa-wasm/kaspa_bg.wasm.bin")) });
+const kaspaModuleUrl = import.meta.resolve("@onekeyfe/kaspa-wasm/kaspa.js");
+initSync({ module: fs.readFileSync(fileURLToPath(new URL("./kaspa_bg.wasm.bin", kaspaModuleUrl))) });
 
 function sha256(bytes) {
   return createHash("sha256").update(bytes).digest();
@@ -450,6 +452,10 @@ function indexEvent(tx) {
 function applyEvent(event) {
   const { payload, transactionId } = event;
   if (!payload?.roundId || !transactionId) return;
+  if (
+    (payload.type === "round-create" || payload.type === "round-register") &&
+    payload.contractVersion && payload.contractVersion !== "raffle-v6-aligned-batch-buy"
+  ) return;
   const round = roundForPayload(payload);
 
   if (payload.type === "round-create" || payload.type === "round-register") {
@@ -477,10 +483,13 @@ function applyEvent(event) {
   if (payload.type === "ticket") {
     if (round.status !== "Open") throw new Error(`Ticket ${transactionId} targets non-open round ${round.roundId}.`);
     const ticketNumber = Number(payload.ticketId);
-    if (ticketNumber !== round.tree.count + 1 || Number(payload.ticketCount || 1) !== 1) {
-      throw new Error(`Ticket ${transactionId} is not the next single ticket for ${round.roundId}.`);
+    const ticketCount = Number(payload.ticketCount || 1);
+    if (ticketNumber !== round.tree.count + 1 || !Number.isInteger(ticketCount) || ticketCount < 1 || ticketCount > 8) {
+      throw new Error(`Ticket ${transactionId} is not the next 1-8 ticket purchase for ${round.roundId}.`);
     }
-    round.tree.append(Buffer.from(fixedHex(payload.buyerPubkey, 32, "Buyer public key"), "hex"), Buffer.from(transactionId, "hex"));
+    const owner = Buffer.from(fixedHex(payload.buyerPubkey, 32, "Buyer public key"), "hex");
+    const txId = Buffer.from(transactionId, "hex");
+    for (let offset = 0; offset < ticketCount; offset += 1) round.tree.append(owner, txId);
     round.latest = { txId: transactionId, ...event.output };
     return;
   }

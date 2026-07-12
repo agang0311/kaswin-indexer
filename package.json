@@ -1,0 +1,12 @@
+{
+  "name": "kaspa-raffle-indexer",
+  "version": "0.4.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node raffle-indexer.mjs"
+  },
+  "dependencies": {
+    "@onekeyfe/kaspa-wasm": "1.0.3-alpha.1"
+  }
+}
