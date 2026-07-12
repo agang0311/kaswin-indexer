@@ -325,6 +325,28 @@ class TicketTree {
     };
   }
 
+  rangeProof8(firstTicketId) {
+    if (!Number.isInteger(firstTicketId) || firstTicketId < 0 || firstTicketId % 8 !== 0 || firstTicketId + 8 > this.count) return undefined;
+    const owners = Array.from({ length: 8 }, (_, offset) => this.owner(firstTicketId + offset));
+    if (owners.some((owner) => !owner)) return undefined;
+    const siblings = [];
+    let pathIndex = firstTicketId >> 3;
+    for (let level = 3; level < DEPTH; level += 1) {
+      const levelCount = Math.ceil(this.count / (1 << level));
+      const siblingIndex = pathIndex ^ 1;
+      siblings.push(siblingIndex < levelCount ? this.readNode(level, siblingIndex) : emptyNodes[level]);
+      pathIndex >>= 1;
+    }
+    return {
+      firstTicketId: firstTicketId + 1,
+      ticketCount: 8,
+      ownerPubkeys: owners.map((owner) => owner.toString("hex")),
+      owners: owners.map((owner) => pubkeyAddress(owner.toString("hex"))),
+      proofHex: Buffer.concat(siblings).toString("hex"),
+      rootHex: this.rootHex
+    };
+  }
+
   get rootHex() {
     return this.count ? this.readNode(DEPTH, 0).toString("hex") : emptyNodes[DEPTH].toString("hex");
   }
@@ -472,6 +494,32 @@ function applyEvent(event) {
       amount: payload.amount
     };
     round.latest = undefined;
+    return;
+  }
+
+  if (payload.type === "round-refund-start") {
+    if (round.refundCursor !== 0) throw new Error(`Refund already started for ${round.roundId}.`);
+    round.status = "Refunding";
+    round.latest = { txId: transactionId, ...event.output };
+    return;
+  }
+
+  if (payload.type === "round-refund-batch") {
+    const claimedCursor = Number(payload.refundCursor ?? round.refundCursor);
+    const ticketCount = Number(payload.ticketCount || 0);
+    if (claimedCursor !== round.refundCursor || ticketCount !== 8 || claimedCursor % 8 !== 0) {
+      throw new Error(`Refund batch cursor mismatch for ${round.roundId}.`);
+    }
+    round.refundCursor += ticketCount;
+    const successor = event.output;
+    if (successor?.covenantId || (successor?.address && round.refundCursor < round.tree.count)) {
+      round.status = "Refunding";
+      round.latest = { txId: transactionId, ...successor };
+    } else {
+      round.status = "Refunded";
+      round.refundTxId = transactionId;
+      round.latest = undefined;
+    }
     return;
   }
 
@@ -722,6 +770,11 @@ const server = http.createServer((request, response) => {
       const ticketId = Number(parts[3]) - 1;
       const proof = round.tree.proof(ticketId);
       return proof ? json(response, 200, proof) : json(response, 404, { error: "Ticket not indexed" });
+    }
+    if (parts[2] === "ranges" && parts.length === 5 && parts[4] === "8") {
+      const firstTicketId = Number(parts[3]) - 1;
+      const proof = round.tree.rangeProof8(firstTicketId);
+      return proof ? json(response, 200, proof) : json(response, 404, { error: "Aligned 8-ticket range not indexed" });
     }
     if (parts[2] === "owners" && parts[3] && parts[4] === "proof") {
       const ticketId = round.tree.ticketForOwner(parts[3]);
