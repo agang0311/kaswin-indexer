@@ -383,8 +383,7 @@ function initializeBaseSnapshot() {
   const temporary = `${baseStatePath}.tmp`;
   fs.writeFileSync(temporary, `${JSON.stringify(base)}\n`);
   fs.renameSync(temporary, baseStatePath);
-  // Missing base metadata identifies a legacy snapshot. Checkpoint its saved
-  // state and begin a new append-only event segment from this point onward.
+  // Checkpoint pre-event-log state and begin a new append-only segment.
   fs.writeFileSync(eventLogPath, "");
   fs.writeFileSync(eventBlockIndexPath, Buffer.alloc(0));
 }
@@ -454,7 +453,7 @@ function applyEvent(event) {
   if (!payload?.roundId || !transactionId) return;
   if (
     (payload.type === "round-create" || payload.type === "round-register") &&
-    payload.contractVersion && payload.contractVersion !== "raffle-v6-aligned-batch-buy"
+    payload.contractVersion && payload.contractVersion !== "raffle-v7-three-commitment-oracles"
   ) return;
   const round = roundForPayload(payload);
 
@@ -465,7 +464,14 @@ function applyEvent(event) {
       creator: payload.creator || round.creator,
       creatorPubkey: payload.creatorPubkey || round.creatorPubkey,
       oraclePublicKey: payload.oraclePublicKey || round.oraclePublicKey,
+      oraclePublicKey2: payload.oraclePublicKey2 || round.oraclePublicKey2,
+      oraclePublicKey3: payload.oraclePublicKey3 || round.oraclePublicKey3,
+      oracleSeedCommitment: payload.oracleSeedCommitment || round.oracleSeedCommitment,
+      oracleSeedCommitment2: payload.oracleSeedCommitment2 || round.oracleSeedCommitment2,
+      oracleSeedCommitment3: payload.oracleSeedCommitment3 || round.oracleSeedCommitment3,
       oracleEndpoint: payload.oracleEndpoint || round.oracleEndpoint,
+      oracleEndpoint2: payload.oracleEndpoint2 || round.oracleEndpoint2,
+      oracleEndpoint3: payload.oracleEndpoint3 || round.oracleEndpoint3,
       ticketPrice: payload.ticketPrice || round.ticketPrice,
       maxTickets: payload.maxTickets ?? round.maxTickets,
       minTickets: payload.minTickets ?? round.minTickets,
