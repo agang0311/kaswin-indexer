@@ -437,6 +437,7 @@ function applyEvent(event) {
       creator: payload.creator || round.creator,
       creatorPubkey: payload.creatorPubkey || round.creatorPubkey,
       oraclePublicKey: payload.oraclePublicKey || round.oraclePublicKey,
+      oracleEndpoint: payload.oracleEndpoint || round.oracleEndpoint,
       ticketPrice: payload.ticketPrice || round.ticketPrice,
       maxTickets: payload.maxTickets ?? round.maxTickets,
       minTickets: payload.minTickets ?? round.minTickets,
