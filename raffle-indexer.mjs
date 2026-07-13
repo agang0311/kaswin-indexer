@@ -470,11 +470,11 @@ function indexEvent(tx) {
 function applyEvent(event) {
   const { payload, transactionId } = event;
   if (!payload?.roundId || !transactionId) return;
-  if (
-    (payload.type === "round-create" || payload.type === "round-register") &&
-    payload.contractVersion && !supportedContractVersion(payload.contractVersion)
-  ) return;
+  const metadataEvent = payload.type === "round-create" || payload.type === "round-register";
+  if (metadataEvent && !supportedContractVersion(payload.contractVersion)) return;
+  if (!rounds.has(payload.roundId) && !metadataEvent) return;
   const round = roundForPayload(payload);
+  if (!supportedContractVersion(round.contractVersion)) return;
 
   if (payload.type === "round-create" || payload.type === "round-register") {
     Object.assign(round, {
