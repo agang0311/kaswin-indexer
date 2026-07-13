@@ -24,3 +24,6 @@ Environment variables:
 | `RAFFLE_INDEX_DATA` | `../.index-data` | Durable index directory |
 | `RAFFLE_INDEX_CONFIRMATIONS` | `10` | Confirmation depth |
 | `RAFFLE_INDEX_POLL_MS` | `1000` | Poll interval |
+| `RAFFLE_INDEX_START_HASH` | Current virtual sink | Initial blue-chain block hash |
+
+Start a new indexer before ticket sales begin. If the round already exists, set `RAFFLE_INDEX_START_HASH` to a blue-chain block hash from before the round-create transaction so the first sync replays its events. After the first checkpoint, the saved cursor is used automatically and this setting is no longer needed.
