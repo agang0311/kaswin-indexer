@@ -25,6 +25,20 @@ const eventLogPath = path.join(dataDir, "events.ndjson");
 const eventBlockIndexPath = path.join(dataDir, "event-blocks.bin");
 const baseStatePath = path.join(dataDir, "base-state.json");
 const baseTicketsDir = path.join(dataDir, "base-tickets");
+
+function replaceFileSync(source, destination) {
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    try {
+      fs.renameSync(source, destination);
+      return;
+    } catch (error) {
+      if (process.platform !== "win32" || !["EPERM", "EACCES", "EEXIST"].includes(error?.code)) throw error;
+      try { fs.rmSync(destination, { force: true }); } catch { /* Retry after transient Windows file locks. */ }
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10 * (attempt + 1));
+    }
+  }
+  fs.renameSync(source, destination);
+}
 const rpcUrl = process.env.KASPA_RPC_URL || "ws://tn12-node.kaspa.com:18210";
 const network = process.env.KASPA_NETWORK || "testnet-10";
 const port = Number(process.env.RAFFLE_INDEX_PORT || 8787);
@@ -160,7 +174,7 @@ class TicketTree {
       rootHex: this.rootHex,
       frontierHex: this.frontierHex
     })}\n`);
-    fs.renameSync(temporary, this.checkpointFile);
+    replaceFileSync(temporary, this.checkpointFile);
   }
 
   closeLevelFiles() {
@@ -386,7 +400,7 @@ function initializeBaseSnapshot() {
   };
   const temporary = `${baseStatePath}.tmp`;
   fs.writeFileSync(temporary, `${JSON.stringify(base)}\n`);
-  fs.renameSync(temporary, baseStatePath);
+  replaceFileSync(temporary, baseStatePath);
   // Checkpoint pre-event-log state and begin a new append-only segment.
   fs.writeFileSync(eventLogPath, "");
   fs.writeFileSync(eventBlockIndexPath, Buffer.alloc(0));
@@ -428,7 +442,7 @@ function saveState() {
   };
   const temporary = `${statePath}.tmp`;
   fs.writeFileSync(temporary, `${JSON.stringify(value)}\n`);
-  fs.renameSync(temporary, statePath);
+  replaceFileSync(temporary, statePath);
 }
 
 function roundForPayload(payload) {
@@ -626,8 +640,8 @@ async function rebuildAfterRemovedBlocks(removed) {
   output.end();
   indexOutput.end();
   await Promise.all([once(output, "finish"), once(indexOutput, "finish")]);
-  fs.renameSync(temporaryLog, eventLogPath);
-  fs.renameSync(temporaryIndex, eventBlockIndexPath);
+  replaceFileSync(temporaryLog, eventLogPath);
+  replaceFileSync(temporaryIndex, eventBlockIndexPath);
 
   restoreBaseSnapshot();
   eventBlockIndex = fs.readFileSync(eventBlockIndexPath);
