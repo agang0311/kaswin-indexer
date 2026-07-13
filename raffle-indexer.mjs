@@ -365,6 +365,10 @@ function readState() {
 
 const saved = readState();
 
+function supportedContractVersion(value) {
+  return value === "raffle-v8-drand-risc0-mainnet" || value === "raffle-v8-drand-risc0-tn12";
+}
+
 function ticketIndexNames(directory = dataDir) {
   if (!fs.existsSync(directory)) return [];
   return fs.readdirSync(directory).filter((name) => name.endsWith(".tickets.bin"));
@@ -378,7 +382,7 @@ function initializeBaseSnapshot() {
   }
   const base = {
     version: 1,
-    rounds: saved.rounds || {}
+    rounds: Object.fromEntries(Object.entries(saved.rounds || {}).filter(([, round]) => supportedContractVersion(round.contractVersion)))
   };
   const temporary = `${baseStatePath}.tmp`;
   fs.writeFileSync(temporary, `${JSON.stringify(base)}\n`);
@@ -391,6 +395,7 @@ function initializeBaseSnapshot() {
 initializeBaseSnapshot();
 const rounds = new Map();
 for (const [roundId, summary] of Object.entries(saved.rounds || {})) {
+  if (!supportedContractVersion(summary.contractVersion)) continue;
   rounds.set(roundId, { ...summary, tree: new TicketTree(roundId, summary) });
 }
 let cursor = process.env.RAFFLE_INDEX_START_HASH || saved.cursor || "";
@@ -453,7 +458,7 @@ function applyEvent(event) {
   if (!payload?.roundId || !transactionId) return;
   if (
     (payload.type === "round-create" || payload.type === "round-register") &&
-    payload.contractVersion && payload.contractVersion !== "raffle-v7-three-commitment-oracles"
+    payload.contractVersion && !supportedContractVersion(payload.contractVersion)
   ) return;
   const round = roundForPayload(payload);
 
@@ -463,15 +468,7 @@ function applyEvent(event) {
       version: payload.version || round.version,
       creator: payload.creator || round.creator,
       creatorPubkey: payload.creatorPubkey || round.creatorPubkey,
-      oraclePublicKey: payload.oraclePublicKey || round.oraclePublicKey,
-      oraclePublicKey2: payload.oraclePublicKey2 || round.oraclePublicKey2,
-      oraclePublicKey3: payload.oraclePublicKey3 || round.oraclePublicKey3,
-      oracleSeedCommitment: payload.oracleSeedCommitment || round.oracleSeedCommitment,
-      oracleSeedCommitment2: payload.oracleSeedCommitment2 || round.oracleSeedCommitment2,
-      oracleSeedCommitment3: payload.oracleSeedCommitment3 || round.oracleSeedCommitment3,
-      oracleEndpoint: payload.oracleEndpoint || round.oracleEndpoint,
-      oracleEndpoint2: payload.oracleEndpoint2 || round.oracleEndpoint2,
-      oracleEndpoint3: payload.oracleEndpoint3 || round.oracleEndpoint3,
+      beaconProofUrl: payload.beaconProofUrl || round.beaconProofUrl,
       ticketPrice: payload.ticketPrice || round.ticketPrice,
       maxTickets: payload.maxTickets ?? round.maxTickets,
       minTickets: payload.minTickets ?? round.minTickets,
@@ -509,6 +506,13 @@ function applyEvent(event) {
       amount: payload.amount
     };
     round.latest = undefined;
+    return;
+  }
+
+  if (payload.type === "round-close") {
+    if (round.status !== "Open") throw new Error(`Round ${round.roundId} is already closed.`);
+    round.status = "Closed";
+    round.latest = { txId: transactionId, ...event.output };
     return;
   }
 
@@ -599,6 +603,7 @@ function restoreBaseSnapshot() {
   }
   const base = JSON.parse(fs.readFileSync(baseStatePath, "utf8"));
   for (const [roundId, summary] of Object.entries(base.rounds || {})) {
+    if (!supportedContractVersion(summary.contractVersion)) continue;
     rounds.set(roundId, { ...summary, tree: new TicketTree(roundId, summary) });
   }
 }
