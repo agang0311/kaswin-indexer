@@ -1,7 +1,7 @@
 {
-  "name": "kaspa-raffle-indexer",
-  "version": "0.7.0",
-  "description": "Read-only ticket index and Merkle proof service for large Kaspa raffle rounds.",
+  "name": "kaswinndexer",
+  "version": "0.8.0",
+  "description": "Read-only ticket index and Merkle proof service for large Kaswin rounds.",
   "private": true,
   "type": "module",
   "engines": {

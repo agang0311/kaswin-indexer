@@ -16,7 +16,7 @@ import {
 
 const DEPTH = 20;
 const CAPACITY = 1 << DEPTH;
-const RECORD_BYTES = 64;
+const RECORD_BYTES = 80;
 const ZERO32 = Buffer.alloc(32);
 const appRoot = import.meta.dirname;
 const dataDir = path.resolve(process.env.RAFFLE_INDEX_DATA || path.join(appRoot, ".index-data"));
@@ -109,15 +109,16 @@ class TicketTree {
   constructor(roundId, summary = {}) {
     this.roundId = roundId;
     this.count = 0;
+    this.ticketCount = 0;
     this.frontier = Buffer.alloc(DEPTH * 32);
     this.levelFds = new Map();
     this.ownerFds = new Map();
     const stem = storageStem(roundId);
-    this.ticketFile = path.join(dataDir, `${stem}.tickets.bin`);
+    this.ticketFile = path.join(dataDir, `${stem}.batches.bin`);
     this.treeDir = path.join(dataDir, `${stem}.tree`);
     this.ownerDir = path.join(this.treeDir, "owners");
     this.checkpointFile = path.join(this.treeDir, "checkpoint.json");
-    const expectedCount = Number(summary.soldTickets || 0);
+    const expectedCount = Number(summary.soldBatches || 0);
     if (expectedCount === 0) return;
     if (!fs.existsSync(this.ticketFile) || fs.statSync(this.ticketFile).size < expectedCount * RECORD_BYTES) {
       throw new Error(`Ticket index for ${roundId} is shorter than its saved ticket count.`);
@@ -131,10 +132,12 @@ class TicketTree {
     if (
       derivedFilesReady &&
       checkpoint?.count === expectedCount &&
+      checkpoint?.ticketCount === Number(summary.soldTickets || 0) &&
       checkpoint.rootHex === summary.ticketRoot &&
       /^[0-9a-f]{1280}$/.test(checkpoint.frontierHex || "")
     ) {
       this.count = expectedCount;
+      this.ticketCount = Number(summary.soldTickets || 0);
       this.frontier = Buffer.from(checkpoint.frontierHex, "hex");
       return;
     }
@@ -147,7 +150,14 @@ class TicketTree {
         if (fs.readSync(fd, record, 0, RECORD_BYTES, index * RECORD_BYTES) !== RECORD_BYTES) {
           throw new Error(`Ticket index for ${roundId} is truncated at ${index}.`);
         }
-        this.append(record.subarray(0, 32), record.subarray(32, 64), false, false);
+        this.append(
+          record.subarray(0, 32),
+          record.subarray(32, 64),
+          Number(record.readBigUInt64LE(64)),
+          Number(record.readBigUInt64LE(72)),
+          false,
+          false
+        );
       }
     } finally {
       fs.closeSync(fd);
@@ -170,8 +180,9 @@ class TicketTree {
     fs.mkdirSync(this.treeDir, { recursive: true });
     const temporary = `${this.checkpointFile}.tmp`;
     fs.writeFileSync(temporary, `${JSON.stringify({
-      version: 1,
+      version: 2,
       count: this.count,
+      ticketCount: this.ticketCount,
       rootHex: this.rootHex,
       frontierHex: this.frontierHex
     })}\n`);
@@ -194,6 +205,7 @@ class TicketTree {
     fs.rmSync(this.treeDir, { recursive: true, force: true });
     fs.mkdirSync(this.ownerDir, { recursive: true });
     this.count = 0;
+    this.ticketCount = 0;
     this.frontier.fill(0);
   }
 
@@ -217,29 +229,33 @@ class TicketTree {
     fs.writeSync(this.levelFd(level), node, 0, 32, index * 32);
   }
 
-  persistTicketRecord(ticketId, owner, transactionId) {
-    const expected = Buffer.concat([owner, transactionId]);
-    if (fs.existsSync(this.ticketFile) && fs.statSync(this.ticketFile).size >= (ticketId + 1) * RECORD_BYTES) {
+  persistBatchRecord(batchIndex, owner, transactionId, firstTicketId, ticketCount) {
+    const expected = Buffer.alloc(RECORD_BYTES);
+    owner.copy(expected, 0);
+    transactionId.copy(expected, 32);
+    expected.writeBigUInt64LE(BigInt(firstTicketId), 64);
+    expected.writeBigUInt64LE(BigInt(ticketCount), 72);
+    if (fs.existsSync(this.ticketFile) && fs.statSync(this.ticketFile).size >= (batchIndex + 1) * RECORD_BYTES) {
       const existing = Buffer.alloc(RECORD_BYTES);
       const fd = fs.openSync(this.ticketFile, "r");
       try {
-        fs.readSync(fd, existing, 0, RECORD_BYTES, ticketId * RECORD_BYTES);
+        fs.readSync(fd, existing, 0, RECORD_BYTES, batchIndex * RECORD_BYTES);
       } finally {
         fs.closeSync(fd);
       }
       if (existing.equals(expected)) return;
-      fs.truncateSync(this.ticketFile, ticketId * RECORD_BYTES);
+      fs.truncateSync(this.ticketFile, batchIndex * RECORD_BYTES);
     }
     fs.appendFileSync(this.ticketFile, expected);
   }
 
-  persistOwnerRecord(ticketId, owner) {
+  persistOwnerRecord(batchIndex, owner) {
     fs.mkdirSync(this.ownerDir, { recursive: true });
     const bucketId = owner[0];
     const bucket = path.join(this.ownerDir, `${bucketId.toString(16).padStart(2, "0")}.bin`);
     const record = Buffer.alloc(36);
     owner.copy(record, 0);
-    record.writeUInt32LE(ticketId, 32);
+    record.writeUInt32LE(batchIndex, 32);
     let fd = this.ownerFds.get(bucketId);
     if (fd === undefined) {
       fd = fs.openSync(bucket, "a");
@@ -248,15 +264,21 @@ class TicketTree {
     fs.writeSync(fd, record);
   }
 
-  append(ownerPubkey, txId, persist = true, checkpoint = true) {
-    if (this.count >= CAPACITY) throw new Error(`Round ${this.roundId} reached Merkle capacity.`);
+  append(ownerPubkey, txId, firstTicketId, ticketCount, persist = true, checkpoint = true) {
+    if (this.count >= CAPACITY) throw new Error(`Round ${this.roundId} reached Merkle batch capacity.`);
     const owner = Buffer.from(ownerPubkey);
     const transactionId = Buffer.from(txId);
-    if (owner.length !== 32 || transactionId.length !== 32) throw new Error("Ticket record must contain a pubkey and transaction id.");
-    const ticketId = this.count;
-    let node = sha256(owner);
-    this.writeNode(0, ticketId, node);
-    let pathIndex = ticketId;
+    if (owner.length !== 32 || transactionId.length !== 32) throw new Error("Batch record must contain a pubkey and transaction id.");
+    if (firstTicketId !== this.ticketCount || ![1, 10, 100, 1000, 10000, 100000].includes(ticketCount)) {
+      throw new Error("Ticket batch is not the next canonical decimal batch.");
+    }
+    const batchIndex = this.count;
+    const encodedRange = Buffer.alloc(16);
+    encodedRange.writeBigUInt64LE(BigInt(firstTicketId), 0);
+    encodedRange.writeBigUInt64LE(BigInt(ticketCount), 8);
+    let node = sha256(Buffer.concat([owner, encodedRange]));
+    this.writeNode(0, batchIndex, node);
+    let pathIndex = batchIndex;
     let carrying = true;
 
     for (let level = 0; level < DEPTH; level += 1) {
@@ -264,51 +286,56 @@ class TicketTree {
         node.copy(this.frontier, level * 32);
         carrying = false;
       }
-      const levelCount = Math.ceil((ticketId + 1) / (1 << level));
+      const levelCount = Math.ceil((batchIndex + 1) / (1 << level));
       const siblingIndex = pathIndex ^ 1;
-      const sibling = siblingIndex < levelCount
-        ? this.readNode(level, siblingIndex)
-        : emptyNodes[level];
+      const sibling = siblingIndex < levelCount ? this.readNode(level, siblingIndex) : emptyNodes[level];
       const parent = (pathIndex & 1) === 0 ? pair(node, sibling) : pair(sibling, node);
       pathIndex >>= 1;
       this.writeNode(level + 1, pathIndex, parent);
       node = parent;
     }
 
-    if (persist) {
-      this.persistTicketRecord(ticketId, owner, transactionId);
-    }
-    this.persistOwnerRecord(ticketId, owner);
+    if (persist) this.persistBatchRecord(batchIndex, owner, transactionId, firstTicketId, ticketCount);
+    this.persistOwnerRecord(batchIndex, owner);
     this.count += 1;
+    this.ticketCount += ticketCount;
     if (checkpoint) this.writeCheckpoint();
-    return ticketId;
+    return batchIndex;
   }
 
-  owner(ticketId) {
-    if (!Number.isInteger(ticketId) || ticketId < 0 || ticketId >= this.count) return undefined;
-    const bytes = Buffer.alloc(32);
+  batch(batchIndex) {
+    if (!Number.isInteger(batchIndex) || batchIndex < 0 || batchIndex >= this.count) return undefined;
+    const bytes = Buffer.alloc(RECORD_BYTES);
     const fd = fs.openSync(this.ticketFile, "r");
     try {
-      if (fs.readSync(fd, bytes, 0, 32, ticketId * RECORD_BYTES) !== 32) return undefined;
+      if (fs.readSync(fd, bytes, 0, RECORD_BYTES, batchIndex * RECORD_BYTES) !== RECORD_BYTES) return undefined;
     } finally {
       fs.closeSync(fd);
     }
-    return bytes;
+    return {
+      owner: bytes.subarray(0, 32),
+      transactionId: bytes.subarray(32, 64),
+      firstTicketId: Number(bytes.readBigUInt64LE(64)),
+      ticketCount: Number(bytes.readBigUInt64LE(72))
+    };
   }
 
-  transactionId(ticketId) {
-    if (!Number.isInteger(ticketId) || ticketId < 0 || ticketId >= this.count) return undefined;
-    const fd = fs.openSync(this.ticketFile, "r");
-    const bytes = Buffer.alloc(32);
-    try {
-      fs.readSync(fd, bytes, 0, 32, ticketId * RECORD_BYTES + 32);
-    } finally {
-      fs.closeSync(fd);
+  batchForTicket(ticketId) {
+    if (!Number.isInteger(ticketId) || ticketId < 0 || ticketId >= this.ticketCount) return -1;
+    let low = 0;
+    let high = this.count - 1;
+    while (low <= high) {
+      const middle = (low + high) >> 1;
+      const batch = this.batch(middle);
+      if (!batch) return -1;
+      if (ticketId < batch.firstTicketId) high = middle - 1;
+      else if (ticketId >= batch.firstTicketId + batch.ticketCount) low = middle + 1;
+      else return middle;
     }
-    return bytes;
+    return -1;
   }
 
-  ticketForOwner(pubkeyHex) {
+  batchForOwner(pubkeyHex) {
     const needle = Buffer.from(fixedHex(pubkeyHex, 32, "Owner public key"), "hex");
     const bucket = path.join(this.ownerDir, `${needle[0].toString(16).padStart(2, "0")}.bin`);
     if (!fs.existsSync(bucket)) return -1;
@@ -319,46 +346,27 @@ class TicketTree {
     return -1;
   }
 
-  proof(ticketId) {
-    const owner = this.owner(ticketId);
-    if (!owner) return undefined;
+  proof(batchIndex, ticketId) {
+    const batch = this.batch(batchIndex);
+    if (!batch) return undefined;
     const siblings = [];
-    let pathIndex = ticketId;
+    let pathIndex = batchIndex;
     for (let level = 0; level < DEPTH; level += 1) {
-      const levelCount = Math.ceil(this.count / (1 << level));
-      const siblingIndex = pathIndex ^ 1;
-      siblings.push(siblingIndex < levelCount
-        ? this.readNode(level, siblingIndex)
-        : emptyNodes[level]);
-      pathIndex >>= 1;
-    }
-    return {
-      ticketId: ticketId + 1,
-      ownerPubkey: owner.toString("hex"),
-      owner: pubkeyAddress(owner.toString("hex")),
-      transactionId: this.transactionId(ticketId)?.toString("hex"),
-      proofHex: Buffer.concat(siblings).toString("hex"),
-      rootHex: this.rootHex
-    };
-  }
-
-  rangeProof8(firstTicketId) {
-    if (!Number.isInteger(firstTicketId) || firstTicketId < 0 || firstTicketId % 8 !== 0 || firstTicketId + 8 > this.count) return undefined;
-    const owners = Array.from({ length: 8 }, (_, offset) => this.owner(firstTicketId + offset));
-    if (owners.some((owner) => !owner)) return undefined;
-    const siblings = [];
-    let pathIndex = firstTicketId >> 3;
-    for (let level = 3; level < DEPTH; level += 1) {
       const levelCount = Math.ceil(this.count / (1 << level));
       const siblingIndex = pathIndex ^ 1;
       siblings.push(siblingIndex < levelCount ? this.readNode(level, siblingIndex) : emptyNodes[level]);
       pathIndex >>= 1;
     }
+    const selectedTicketId = ticketId ?? batch.firstTicketId;
+    if (selectedTicketId < batch.firstTicketId || selectedTicketId >= batch.firstTicketId + batch.ticketCount) return undefined;
     return {
-      firstTicketId: firstTicketId + 1,
-      ticketCount: 8,
-      ownerPubkeys: owners.map((owner) => owner.toString("hex")),
-      owners: owners.map((owner) => pubkeyAddress(owner.toString("hex"))),
+      ticketId: selectedTicketId + 1,
+      batchIndex,
+      firstTicketId: batch.firstTicketId + 1,
+      ticketCount: batch.ticketCount,
+      ownerPubkey: batch.owner.toString("hex"),
+      owner: pubkeyAddress(batch.owner.toString("hex")),
+      transactionId: batch.transactionId.toString("hex"),
       proofHex: Buffer.concat(siblings).toString("hex"),
       rootHex: this.rootHex
     };
@@ -381,12 +389,12 @@ function readState() {
 const saved = readState();
 
 function supportedContractVersion(value) {
-  return value === "raffle-v13-chain-pow";
+  return value === "raffle-v14-batch-range";
 }
 
 function ticketIndexNames(directory = dataDir) {
   if (!fs.existsSync(directory)) return [];
-  return fs.readdirSync(directory).filter((name) => name.endsWith(".tickets.bin"));
+  return fs.readdirSync(directory).filter((name) => name.endsWith(".batches.bin"));
 }
 
 function initializeBaseSnapshot() {
@@ -396,7 +404,7 @@ function initializeBaseSnapshot() {
     fs.copyFileSync(path.join(dataDir, name), path.join(baseTicketsDir, name));
   }
   const base = {
-    version: 1,
+    version: 2,
     rounds: Object.fromEntries(Object.entries(saved.rounds || {}).filter(([, round]) => supportedContractVersion(round.contractVersion)))
   };
   const temporary = `${baseStatePath}.tmp`;
@@ -425,7 +433,8 @@ function serializableRound(round) {
   const { tree, ...summary } = round;
   return {
     ...summary,
-    soldTickets: tree.count,
+    soldTickets: tree.ticketCount,
+    soldBatches: tree.count,
     ticketRoot: tree.rootHex,
     ticketFrontier: tree.frontierHex
   };
@@ -433,7 +442,7 @@ function serializableRound(round) {
 
 function saveState() {
   const value = {
-    version: 1,
+    version: 2,
     network,
     rpcUrl,
     cursor,
@@ -454,6 +463,7 @@ function roundForPayload(payload) {
       contractVersion: payload.contractVersion || "",
       status: "Open",
       refundCursor: 0,
+      refundBatchCursor: 0,
       tree: new TicketTree(payload.roundId)
     };
     rounds.set(payload.roundId, round);
@@ -501,12 +511,12 @@ function applyEvent(event) {
     if (round.status !== "Open") throw new Error(`Ticket ${transactionId} targets non-open round ${round.roundId}.`);
     const ticketNumber = Number(payload.ticketId);
     const ticketCount = Number(payload.ticketCount || 1);
-    if (ticketNumber !== round.tree.count + 1 || !Number.isInteger(ticketCount) || ticketCount < 1 || ticketCount > 8) {
-      throw new Error(`Ticket ${transactionId} is not the next 1-8 ticket purchase for ${round.roundId}.`);
+    if (ticketNumber !== round.tree.ticketCount + 1 || ![1, 10, 100, 1000, 10000, 100000].includes(ticketCount)) {
+      throw new Error(`Ticket ${transactionId} is not the next supported decimal ticket batch for ${round.roundId}.`);
     }
     const owner = Buffer.from(fixedHex(payload.buyerPubkey, 32, "Buyer public key"), "hex");
     const txId = Buffer.from(transactionId, "hex");
-    for (let offset = 0; offset < ticketCount; offset += 1) round.tree.append(owner, txId);
+    round.tree.append(owner, txId, ticketNumber - 1, ticketCount);
     round.latest = { txId: transactionId, ...event.output };
     return;
   }
@@ -524,7 +534,7 @@ function applyEvent(event) {
   }
 
   if (payload.type === "round-refund-start") {
-    if (round.refundCursor !== 0) throw new Error(`Refund already started for ${round.roundId}.`);
+    if (round.refundCursor !== 0 || round.refundBatchCursor !== 0) throw new Error(`Refund already started for ${round.roundId}.`);
     round.status = "Refunding";
     round.latest = { txId: transactionId, ...event.output };
     return;
@@ -532,29 +542,19 @@ function applyEvent(event) {
 
   if (payload.type === "round-refund-batch") {
     const claimedCursor = Number(payload.refundCursor ?? round.refundCursor);
+    const claimedBatchCursor = Number(payload.refundBatchCursor ?? round.refundBatchCursor);
+    const batch = round.tree.batch(round.refundBatchCursor);
     const ticketCount = Number(payload.ticketCount || 0);
-    if (claimedCursor !== round.refundCursor || ticketCount !== 8 || claimedCursor % 8 !== 0) {
+    if (
+      claimedCursor !== round.refundCursor || claimedBatchCursor !== round.refundBatchCursor ||
+      !batch || ticketCount !== batch.ticketCount || claimedCursor !== batch.firstTicketId
+    ) {
       throw new Error(`Refund batch cursor mismatch for ${round.roundId}.`);
     }
     round.refundCursor += ticketCount;
+    round.refundBatchCursor += 1;
     const successor = event.output;
-    if (successor?.covenantId || (successor?.address && round.refundCursor < round.tree.count)) {
-      round.status = "Refunding";
-      round.latest = { txId: transactionId, ...successor };
-    } else {
-      round.status = "Refunded";
-      round.refundTxId = transactionId;
-      round.latest = undefined;
-    }
-    return;
-  }
-
-  if (payload.type === "round-refund-ticket") {
-    const claimedCursor = Number(payload.refundCursor ?? round.refundCursor);
-    if (claimedCursor !== round.refundCursor) throw new Error(`Refund cursor mismatch for ${round.roundId}.`);
-    round.refundCursor += 1;
-    const successor = event.output;
-    if (successor?.covenantId || (successor?.address && round.refundCursor < round.tree.count)) {
+    if (successor?.covenantId || (successor?.address && round.refundBatchCursor < round.tree.count)) {
       round.status = "Refunding";
       round.latest = { txId: transactionId, ...successor };
     } else {
@@ -751,12 +751,14 @@ function publicRound(round) {
       txId: round.latest.txId,
       outputIndex: round.latest.index || 0,
       amountSompi: round.latest.amountSompi,
-      soldTickets: round.tree.count,
-      potAmount: (BigInt(round.ticketPrice || 0) * BigInt(Math.max(0, round.tree.count - round.refundCursor))).toString(),
+      soldTickets: round.tree.ticketCount,
+      soldBatches: round.tree.count,
+      potAmount: (BigInt(round.ticketPrice || 0) * BigInt(Math.max(0, round.tree.ticketCount - round.refundCursor))).toString(),
       status: round.status,
       ticketRoot: round.tree.rootHex,
       ticketFrontier: round.tree.frontierHex,
       refundCursor: round.refundCursor,
+      refundBatchCursor: round.refundBatchCursor,
       creatorPubkey: round.creatorPubkey,
       refundAfterDaaScore: round.refundAfterDaaScore,
       ticketOwnerPubkeys: []
@@ -794,17 +796,17 @@ const server = http.createServer((request, response) => {
     if (parts.length === 2) return json(response, 200, publicRound(round));
     if (parts[2] === "tickets" && parts.length === 4) {
       const ticketId = Number(parts[3]) - 1;
-      const proof = round.tree.proof(ticketId);
+      const proof = round.tree.proof(round.tree.batchForTicket(ticketId), ticketId);
       return proof ? json(response, 200, proof) : json(response, 404, { error: "Ticket not indexed" });
     }
-    if (parts[2] === "ranges" && parts.length === 5 && parts[4] === "8") {
-      const firstTicketId = Number(parts[3]) - 1;
-      const proof = round.tree.rangeProof8(firstTicketId);
-      return proof ? json(response, 200, proof) : json(response, 404, { error: "Aligned 8-ticket range not indexed" });
+    if (parts[2] === "batches" && parts.length === 4) {
+      const batchIndex = Number(parts[3]);
+      const proof = round.tree.proof(batchIndex);
+      return proof ? json(response, 200, proof) : json(response, 404, { error: "Purchase batch not indexed" });
     }
     if (parts[2] === "owners" && parts[3] && parts[4] === "proof") {
-      const ticketId = round.tree.ticketForOwner(parts[3]);
-      const proof = round.tree.proof(ticketId);
+      const batchIndex = round.tree.batchForOwner(parts[3]);
+      const proof = round.tree.proof(batchIndex);
       return proof ? json(response, 200, proof) : json(response, 404, { error: "Owner did not buy a ticket" });
     }
     return json(response, 404, { error: "Not found" });

@@ -1,0 +1,7 @@
+node_modules/
+.index-data/
+.env
+.env.*
+!.env.example
+*.log
+
