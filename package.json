@@ -1,6 +1,6 @@
 {
   "name": "kaswinndexer",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "description": "Read-only ticket index and Merkle proof service for large Kaswin rounds.",
   "private": true,
   "type": "module",

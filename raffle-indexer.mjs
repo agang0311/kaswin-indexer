@@ -269,8 +269,8 @@ class TicketTree {
     const owner = Buffer.from(ownerPubkey);
     const transactionId = Buffer.from(txId);
     if (owner.length !== 32 || transactionId.length !== 32) throw new Error("Batch record must contain a pubkey and transaction id.");
-    if (firstTicketId !== this.ticketCount || ![1, 10, 100, 1000, 10000, 100000].includes(ticketCount)) {
-      throw new Error("Ticket batch is not the next canonical decimal batch.");
+    if (firstTicketId !== this.ticketCount || !Number.isSafeInteger(ticketCount) || ticketCount < 1 || ticketCount > 1_000_000) {
+      throw new Error("Ticket batch is not the next canonical positive range.");
     }
     const batchIndex = this.count;
     const encodedRange = Buffer.alloc(16);
@@ -389,7 +389,7 @@ function readState() {
 const saved = readState();
 
 function supportedContractVersion(value) {
-  return value === "raffle-v14-batch-range";
+  return value === "raffle-v15-arbitrary-batched-refund" || value === "raffle-v14-batch-range";
 }
 
 function ticketIndexNames(directory = dataDir) {
@@ -511,8 +511,12 @@ function applyEvent(event) {
     if (round.status !== "Open") throw new Error(`Ticket ${transactionId} targets non-open round ${round.roundId}.`);
     const ticketNumber = Number(payload.ticketId);
     const ticketCount = Number(payload.ticketCount || 1);
-    if (ticketNumber !== round.tree.ticketCount + 1 || ![1, 10, 100, 1000, 10000, 100000].includes(ticketCount)) {
-      throw new Error(`Ticket ${transactionId} is not the next supported decimal ticket batch for ${round.roundId}.`);
+    if (
+      ticketNumber !== round.tree.ticketCount + 1 ||
+      !Number.isSafeInteger(ticketCount) || ticketCount < 1 || ticketCount > 1_000_000 ||
+      round.tree.ticketCount + ticketCount > round.maxTickets
+    ) {
+      throw new Error(`Ticket ${transactionId} is not the next valid ticket batch for ${round.roundId}.`);
     }
     const owner = Buffer.from(fixedHex(payload.buyerPubkey, 32, "Buyer public key"), "hex");
     const txId = Buffer.from(transactionId, "hex");
@@ -543,16 +547,28 @@ function applyEvent(event) {
   if (payload.type === "round-refund-batch") {
     const claimedCursor = Number(payload.refundCursor ?? round.refundCursor);
     const claimedBatchCursor = Number(payload.refundBatchCursor ?? round.refundBatchCursor);
-    const batch = round.tree.batch(round.refundBatchCursor);
+    const batchCount = Number(payload.batchCount || 1);
     const ticketCount = Number(payload.ticketCount || 0);
+    let expectedTicketCount = 0;
+    let expectedCursor = round.refundCursor;
+    let validBatchRange = Number.isSafeInteger(batchCount) && batchCount > 0 && batchCount <= 13;
+    for (let offset = 0; validBatchRange && offset < batchCount; offset += 1) {
+      const batch = round.tree.batch(round.refundBatchCursor + offset);
+      if (!batch || batch.firstTicketId !== expectedCursor) {
+        validBatchRange = false;
+        break;
+      }
+      expectedTicketCount += batch.ticketCount;
+      expectedCursor += batch.ticketCount;
+    }
     if (
       claimedCursor !== round.refundCursor || claimedBatchCursor !== round.refundBatchCursor ||
-      !batch || ticketCount !== batch.ticketCount || claimedCursor !== batch.firstTicketId
+      !validBatchRange || ticketCount !== expectedTicketCount
     ) {
       throw new Error(`Refund batch cursor mismatch for ${round.roundId}.`);
     }
     round.refundCursor += ticketCount;
-    round.refundBatchCursor += 1;
+    round.refundBatchCursor += batchCount;
     const successor = event.output;
     if (successor?.covenantId || (successor?.address && round.refundBatchCursor < round.tree.count)) {
       round.status = "Refunding";
