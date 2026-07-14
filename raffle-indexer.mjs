@@ -41,6 +41,7 @@ function replaceFileSync(source, destination) {
 }
 const rpcUrl = process.env.KASPA_RPC_URL || "ws://tn12-node.kaspa.com:18210";
 const network = process.env.KASPA_NETWORK || "testnet-10";
+const host = process.env.RAFFLE_INDEX_HOST || "127.0.0.1";
 const port = Number(process.env.RAFFLE_INDEX_PORT || 8787);
 const confirmations = Number(process.env.RAFFLE_INDEX_CONFIRMATIONS || 10);
 const pollMs = Number(process.env.RAFFLE_INDEX_POLL_MS || 1_000);
@@ -380,7 +381,7 @@ function readState() {
 const saved = readState();
 
 function supportedContractVersion(value) {
-  return value === "raffle-v8-drand-risc0-mainnet" || value === "raffle-v8-drand-risc0-tn12";
+  return value === "raffle-v12-chain-pow-mainnet" || value === "raffle-v12-chain-pow-tn12";
 }
 
 function ticketIndexNames(directory = dataDir) {
@@ -482,7 +483,6 @@ function applyEvent(event) {
       version: payload.version || round.version,
       creator: payload.creator || round.creator,
       creatorPubkey: payload.creatorPubkey || round.creatorPubkey,
-      beaconProofUrl: payload.beaconProofUrl || round.beaconProofUrl,
       ticketPrice: payload.ticketPrice || round.ticketPrice,
       maxTickets: payload.maxTickets ?? round.maxTickets,
       minTickets: payload.minTickets ?? round.minTickets,
@@ -520,13 +520,6 @@ function applyEvent(event) {
       amount: payload.amount
     };
     round.latest = undefined;
-    return;
-  }
-
-  if (payload.type === "round-close") {
-    if (round.status !== "Open") throw new Error(`Round ${round.roundId} is already closed.`);
-    round.status = "Closed";
-    round.latest = { txId: transactionId, ...event.output };
     return;
   }
 
@@ -785,7 +778,6 @@ const server = http.createServer((request, response) => {
       return json(response, 200, {
         ok: true,
         network,
-        rpcUrl,
         cursor,
         rounds: rounds.size,
         syncing,
@@ -826,9 +818,9 @@ if (!offline) {
   await syncOnce();
 }
 const timer = offline ? undefined : setInterval(syncOnce, pollMs);
-server.listen(port, "127.0.0.1", () => {
+server.listen(port, host, () => {
   const source = offline ? "offline fixture" : `${rpcUrl} (${network}, ${confirmations} confirmations)`;
-  console.log(`[indexer] http://127.0.0.1:${port} -> ${source}`);
+  console.log(`[indexer] http://${host}:${port} -> ${source}`);
 });
 
 async function shutdown() {
