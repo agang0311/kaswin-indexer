@@ -381,7 +381,7 @@ function readState() {
 const saved = readState();
 
 function supportedContractVersion(value) {
-  return value === "raffle-v12-chain-pow-mainnet" || value === "raffle-v12-chain-pow-tn12";
+  return value === "raffle-v13-chain-pow";
 }
 
 function ticketIndexNames(directory = dataDir) {
