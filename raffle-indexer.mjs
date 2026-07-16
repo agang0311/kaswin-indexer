@@ -39,7 +39,7 @@ function replaceFileSync(source, destination) {
   }
   fs.renameSync(source, destination);
 }
-const rpcUrl = process.env.KASPA_RPC_URL || "ws://tn12-node.kaspa.com:18210";
+const rpcUrl = process.env.KASPA_RPC_URL || "wss://vector-10.kaspa.green/kaspa/testnet-10/wrpc/borsh";
 const network = process.env.KASPA_NETWORK || "testnet-10";
 const host = process.env.RAFFLE_INDEX_HOST || "127.0.0.1";
 const port = Number(process.env.RAFFLE_INDEX_PORT || 8787);
