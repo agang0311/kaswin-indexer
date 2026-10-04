@@ -116,3 +116,12 @@ node indexer.mjs status --db events.sqlite
 # 前台启动运行
 node indexer.mjs run --db events.sqlite --pool --api-port 8788
 ```
+
+---
+
+## 适配其他合约 DApp (二次开发)
+
+本项目采用插件化架构，底层 Borsh wRPC 连接、双节点故障转移、Selected-chain acceptance 共识核验、重组回滚和 SQLite 存储**完全通用**。
+
+如果你想将此 Indexer 改造并接入自己的 Kaspa Covenant DApp（如 AMM、拍卖、借贷、订单薄等）：
+👉 **详细步骤与插件编写示例见：[二次开发与适配指南 (CUSTOM_DAPP_GUIDE.md)](./CUSTOM_DAPP_GUIDE.md)**

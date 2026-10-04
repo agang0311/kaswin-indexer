@@ -116,3 +116,12 @@ node indexer.mjs status --db events.sqlite
 # Run in foreground for debugging
 node indexer.mjs run --db events.sqlite --pool --api-port 8788
 ```
+
+---
+
+## Adapting for Custom Covenant DApps
+
+This project is built around a pluggable architecture. The underlying Borsh wRPC connection, dual-node failover pool, selected-chain acceptance verification, reorg rollback engine, and SQLite storage are **completely generic and reusable**.
+
+If you wish to adapt this indexer for your own Kaspa Covenant DApp (e.g., AMM, auctions, order books, bridges):
+👉 **See the complete walkthrough: [Custom DApp Adaptation Guide (CUSTOM_DAPP_GUIDE.en.md)](./CUSTOM_DAPP_GUIDE.en.md)**
