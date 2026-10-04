@@ -1,5 +1,7 @@
 # Kaswin Event Indexer (`kaswin-indexer`)
 
+[English](./README.en.md) | [简体中文](./README.md)
+
 Kaspa Testnet 10 上的 Kaswin 状态契约（Covenant）只读事件索引器与 CID REST 服务的独立自包含发布版本。
 
 本项目用于监听链上事件、定位花费者、验证选定链 acceptance、核验固定契约规则（默认 **F3.2**，兼容旧版 **F3** 终局轮次），并为前端 DApp / Kaswin Web 提供低延迟的 CID 只读接口。
