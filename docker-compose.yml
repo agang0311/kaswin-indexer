@@ -12,6 +12,8 @@ services:
       - KASWIN_NODE_URLS=${KASWIN_NODE_URLS:-}
       # 注册表地址（留空使用默认官方 TN10 Registry）
       - KASWIN_REGISTRY_ADDRESSES=${KASWIN_REGISTRY_ADDRESSES:-}
+      # 跨域设置（默认允许全部跨域 '*'）
+      - KASWIN_CORS_ORIGIN=${KASWIN_CORS_ORIGIN:-*}
     volumes:
       - indexer-data:/data
     deploy:

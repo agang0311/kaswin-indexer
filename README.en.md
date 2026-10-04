@@ -85,6 +85,7 @@ Settings can be customized via `.env` environment variables or CLI flags:
 | `KASWIN_NODE_URL` | `--url` | Single fixed wRPC node URL (Borsh) | Empty (uses pool) |
 | `KASWIN_NODE_URLS` | `--urls` | Comma-separated dual-node URLs | Empty |
 | `KASWIN_REGISTRY_ADDRESSES` | `--registry-addresses` | Watched Kaswin Registry address list | Official TN10 Registry |
+| `KASWIN_CORS_ORIGIN` | `--cors-origin` | Allowed CORS origin (`*`, URL, or `none`) | `*` (open by default) |
 | `KASWIN_API_PORT` | `--api-port` | REST API listening port | `8788` |
 | `KASWIN_API_HOST` | `--api-host` | REST API listening host | `0.0.0.0` |
 

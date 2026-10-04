@@ -15,16 +15,25 @@ function view(r, detail = false) {
     updatedAt: r.updatedAt, liveSeenAt: r.liveSeenAt,
     ...(detail ? {state: d.state, purchases: d.purchases, origin: d.origin, scriptPublicKey: d.spk} : {})};
 }
-export function createApi({store, corsOrigin = null}) {
-  if (corsOrigin && (!/^https?:\/\/[^/]+$/.test(corsOrigin) || corsOrigin.includes('*'))) throw Error('INVALID_CORS_ORIGIN');
+export function createApi({store, corsOrigin = '*'}) {
+  const isNone = corsOrigin === false || corsOrigin === null || corsOrigin === 'none';
+  if (!isNone && corsOrigin !== '*' && !/^https?:\/\/[^/]+$/.test(corsOrigin)) throw Error('INVALID_CORS_ORIGIN');
   const server = http.createServer((req, res) => {
     const send = (status, body) => {
       res.writeHead(status, {'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff'});
       res.end(JSON.stringify(body, (_, v) => typeof v === 'bigint' ? v.toString() : v));
     };
-    if (corsOrigin && req.headers.origin === corsOrigin) {
-      res.setHeader('Access-Control-Allow-Origin', corsOrigin); res.setHeader('Vary', 'Origin');
-      res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+    if (!isNone) {
+      if (corsOrigin === '*') {
+        res.setHeader('Access-Control-Allow-Origin', '*');
+        res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+        res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+      } else if (req.headers.origin === corsOrigin) {
+        res.setHeader('Access-Control-Allow-Origin', corsOrigin);
+        res.setHeader('Vary', 'Origin');
+        res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+        res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+      }
     }
     if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
     if (req.method !== 'GET') { res.setHeader('Allow', 'GET, OPTIONS'); send(405, {detail: 'METHOD_NOT_ALLOWED'}); return; }

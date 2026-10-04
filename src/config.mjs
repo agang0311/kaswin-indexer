@@ -16,5 +16,7 @@ export function runtimeOptions(cli, env = process.env) {
       throw Error('INVALID_REGISTRY_ADDRESSES');
     out.registryAddresses = list; // Actual address checksum/SPK validated by the pinned SDK at plugin creation.
   }
+  const cors = cli['cors-origin'] ?? env.KASWIN_CORS_ORIGIN;
+  if (cors !== undefined) out['cors-origin'] = cors;
   return out;
 }

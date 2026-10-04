@@ -25,7 +25,7 @@ const {values: cli, positionals: [cmd = 'run', ...rest]} = parseArgs({allowPosit
   relay: {type: 'string'}, 'relay-file': {type: 'string'},
   contracts: {type: 'string', default: new URL('./contracts/default.json', import.meta.url).pathname}, contract: {type: 'string'},
   'legacy-contract': {type: 'string'}, 'registry-addresses': {type: 'string'},
-  'api-port': {type: 'string'}, 'api-host': {type: 'string', default: '127.0.0.1'}, 'cors-origin': {type: 'string'},
+  'api-port': {type: 'string'}, 'api-host': {type: 'string', default: '127.0.0.1'}, 'cors-origin': {type: 'string', default: '*'},
   'checkpoint-ms': {type: 'string', default: '3000'}, 'reconcile-ms': {type: 'string', default: '60000'},
   'finality-blue-score': {type: 'string', default: '600'},
 }});
@@ -106,7 +106,7 @@ await engine.start();
 log('STARTED', {node: node.identity, live: store.rounds({liveOnly: true}).length, contracts: contracts.describe()});
 let api = null;
 if (o['api-port']) {
-  api = createApi({store, corsOrigin: o['cors-origin'] ?? null});
+  api = createApi({store, corsOrigin: o['cors-origin'] ?? '*'});
   await new Promise((resolve, reject) => { api.once('error', reject); api.listen(Number(o['api-port']), o['api-host'], resolve); });
   log('API_LISTENING', api.address());
 }

@@ -85,6 +85,7 @@ systemctl restart kaswin-indexer.service  # 重启服务
 | `KASWIN_NODE_URL` | `--url` | 固定单 wRPC 节点地址 | 留空（使用节点池） |
 | `KASWIN_NODE_URLS` | `--urls` | 逗号分隔的双节点地址 | 留空 |
 | `KASWIN_REGISTRY_ADDRESSES` | `--registry-addresses` | 监听的 Registry 地址列表 | 官方 TN10 Registry |
+| `KASWIN_CORS_ORIGIN` | `--cors-origin` | 跨域来源（`*`、具体域名或 `none` 禁用） | `*`（默认允许跨域） |
 | `KASWIN_API_PORT` | `--api-port` | REST API 端口 | `8788` |
 | `KASWIN_API_HOST` | `--api-host` | REST API 监听地址 | `0.0.0.0` |
 
