@@ -1,0 +1,24 @@
+services:
+  indexer:
+    build: .
+    image: kaswin-indexer:latest
+    container_name: kaswin-indexer
+    restart: unless-stopped
+    ports:
+      - "8788:8788"
+    environment:
+      # 节点配置（留空则默认使用内置双节点探测池与热备故障转移）
+      - KASWIN_NODE_URL=${KASWIN_NODE_URL:-}
+      - KASWIN_NODE_URLS=${KASWIN_NODE_URLS:-}
+      # 注册表地址（留空使用默认官方 TN10 Registry）
+      - KASWIN_REGISTRY_ADDRESSES=${KASWIN_REGISTRY_ADDRESSES:-}
+    volumes:
+      - indexer-data:/data
+    deploy:
+      resources:
+        limits:
+          memory: 384M
+
+volumes:
+  indexer-data:
+    name: kaswin-indexer-data

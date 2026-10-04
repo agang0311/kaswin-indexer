@@ -1,14 +1,17 @@
 {
   "name": "kaswin-indexer",
-  "version": "0.9.1",
-  "description": "Read-only ticket index and Merkle proof service for large Kaswin rounds.",
+  "version": "1.0.0",
+  "description": "Kaswin covenant event indexer and CID REST service on Kaspa Testnet 10 (F3.2 / F3)",
   "private": true,
   "type": "module",
   "engines": {
-    "node": ">=22.11.0"
+    "node": ">=22.0.0"
   },
   "scripts": {
-    "start": "node raffle-indexer.mjs"
+    "start": "node indexer.mjs run",
+    "contracts": "node indexer.mjs contracts",
+    "status": "node indexer.mjs status",
+    "raffle": "node raffle-indexer.mjs"
   },
   "dependencies": {
     "@onekeyfe/kaspa-wasm": "1.0.3-alpha.1"

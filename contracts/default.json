@@ -1,0 +1,24 @@
+{
+  "contracts": [
+    {
+      "module": "kaswin-f32.mjs",
+      "retired": false,
+      "options": {
+        "profileId": "7ca61d81be1a2448d16b18cb2bdce845c91ed4993a6da0fd26b14d211fbce863",
+        "networkGenesis": "f896a3034873be1739fc4359236899fd3d65d2bc94f9780df0d0da3eb1cc4370",
+        "registryAddresses": ["kaspatest:qztrjpfpuf6g9jw76e6ay909z43hndpv5maqkker6ur4enz7llarsh82ezggl"],
+        "registrationSompi": "5000000"
+      }
+    },
+    {
+      "module": "kaswin-f3.mjs",
+      "retired": true,
+      "options": {
+        "profileId": "1dc418097f31655000dc779cd2c68d17812b981ab9868f25e7266d14fe70ba61",
+        "networkGenesis": "f896a3034873be1739fc4359236899fd3d65d2bc94f9780df0d0da3eb1cc4370",
+        "registryAddresses": ["kaspatest:qztrjpfpuf6g9jw76e6ay909z43hndpv5maqkker6ur4enz7llarsh82ezggl"],
+        "registrationSompi": "5000000"
+      }
+    }
+  ]
+}
