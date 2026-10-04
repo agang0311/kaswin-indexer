@@ -116,5 +116,3 @@ node indexer.mjs status --db events.sqlite
 # Run in foreground for debugging
 node indexer.mjs run --db events.sqlite --pool --api-port 8788
 ```
-
-> **Note**: The legacy ticket Merkle proof indexer for ultra-large raffle rounds is preserved in `raffle-indexer.mjs` and can be invoked via `npm run raffle`.

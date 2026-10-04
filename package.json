@@ -10,10 +10,6 @@
   "scripts": {
     "start": "node indexer.mjs run",
     "contracts": "node indexer.mjs contracts",
-    "status": "node indexer.mjs status",
-    "raffle": "node raffle-indexer.mjs"
-  },
-  "dependencies": {
-    "@onekeyfe/kaspa-wasm": "1.0.3-alpha.1"
+    "status": "node indexer.mjs status"
   }
 }

@@ -6,7 +6,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certifi
 
 COPY package.json ./
 COPY indexer.mjs ./
-COPY raffle-indexer.mjs ./
 COPY contracts/ ./contracts/
 COPY src/ ./src/
 COPY artifacts/ ./artifacts/

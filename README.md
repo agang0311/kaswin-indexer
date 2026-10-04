@@ -116,5 +116,3 @@ node indexer.mjs status --db events.sqlite
 # 前台启动运行
 node indexer.mjs run --db events.sqlite --pool --api-port 8788
 ```
-
-> **注意**：原用于超千张票抽奖的离线 Proof 工具仍保留在 `raffle-indexer.mjs` 中，可通过 `npm run raffle` 启动。
