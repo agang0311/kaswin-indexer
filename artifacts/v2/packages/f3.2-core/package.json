@@ -1,0 +1,7 @@
+{
+  "name": "kaswin-f3-2-core-snapshot",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Pinned V2 dependency closure; off-chain helpers, not the on-chain contracts"
+}

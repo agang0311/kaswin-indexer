@@ -4,7 +4,7 @@
 
 Standalone read-only event indexer and CID REST service for Kaswin stateful covenants on **Kaspa Testnet 10**.
 
-This service tracks on-chain UTXO events, resolves spenders, validates selected-chain transaction acceptance, enforces pinned contract transition rules (defaulting to **F3.2**, with backward compatibility for existing **F3** terminal rounds), and provides low-latency, CID-keyed REST endpoints for front-end DApps and Kaswin Web.
+This service tracks on-chain UTXO events, resolves spenders, validates selected-chain transaction acceptance, enforces pinned contract transition rules (defaulting to **V2**, with backward compatibility for existing **F3.2** and **F3** terminal rounds), and provides low-latency, CID-keyed REST endpoints for front-end DApps and Kaswin Web.
 
 - **Read-Only & Secure**: Holds no private keys, signs no transactions, and never broadcasts to the network.
 - **Dual-Node Hot-Standby Pool**: Built-in automatic discovery and failover using official Testnet 10 seeds and resolvers.

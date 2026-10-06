@@ -1,8 +1,18 @@
 {
   "contracts": [
     {
-      "module": "kaswin-f32.mjs",
+      "module": "kaswin-v2.mjs",
       "retired": false,
+      "options": {
+        "profileId": "206d4ec7072727ae3291726f19c82293b38340a5a7de05d306cf105c4206a9c3",
+        "networkGenesis": "f896a3034873be1739fc4359236899fd3d65d2bc94f9780df0d0da3eb1cc4370",
+        "registryAddresses": ["kaspatest:qztrjpfpuf6g9jw76e6ay909z43hndpv5maqkker6ur4enz7llarsh82ezggl"],
+        "registrationSompi": "5000000"
+      }
+    },
+    {
+      "module": "kaswin-f32.mjs",
+      "retired": true,
       "options": {
         "profileId": "7ca61d81be1a2448d16b18cb2bdce845c91ed4993a6da0fd26b14d211fbce863",
         "networkGenesis": "f896a3034873be1739fc4359236899fd3d65d2bc94f9780df0d0da3eb1cc4370",
