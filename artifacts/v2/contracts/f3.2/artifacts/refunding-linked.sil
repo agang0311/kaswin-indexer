@@ -87,6 +87,25 @@ contract KaswinRefunding(byte[] initialLedger) {
         require(tx.inputs[0].value == DEPOSIT + (u32(ledger, 36) - paidTickets(ledger)) * u63(ledger, 8));
     }
 
+    // Returns externally funded value; both fee and sponsor amounts are introspected.
+    function checkFee(int fee): int {
+        require(fee > 0 && fee <= 50000000);
+        int totalIn = 0;
+        int totalOut = 0;
+        for (fi, 0, tx.inputs.length, 9) {
+            int amountIn = tx.inputs[fi].value;
+            require(amountIn > 0 && amountIn <= VALUE_LIMIT);
+            totalIn = totalIn + amountIn;
+        }
+        for (fo, 0, tx.outputs.length, 34) {
+            int amountOut = tx.outputs[fo].value;
+            require(amountOut > 0 && amountOut <= VALUE_LIMIT);
+            totalOut = totalOut + amountOut;
+        }
+        require(totalIn - totalOut == fee);
+        return totalIn - tx.inputs[0].value;
+    }
+
     function ordinary(int index, int amount, pubkey recipient) {
         require(amount > 0 && amount <= VALUE_LIMIT);
         require(tx.outputs[index].value == amount);
@@ -120,6 +139,7 @@ contract KaswinRefunding(byte[] initialLedger) {
         require(cid != ZERO && OpCovInputCount(cid) == 1 && OpCovInputIdx(cid, 0) == 0);
         byte[] tail = authenticatedTail(programTailBytes);
         checkLedger();
+        int externalValue = checkFee(fee);
         int phase = u32(ledger, 4);
 
         require(action == 10);
@@ -147,6 +167,7 @@ contract KaswinRefunding(byte[] initialLedger) {
         }
         int a10Gross = (a10PreviousEnd - a10InitialEnd) * a10Price;
         require(tx.outputs.length == a10Batch + 2);
+        ordinary(a10Batch + 1, externalValue + a10Batch * REFUND_FEE - fee, actorPk);
         if (a10Last) {
             require(a10PreviousEnd == u32(ledger, 36));
             terminal(a10Batch + 2);

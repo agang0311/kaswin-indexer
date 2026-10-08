@@ -1,0 +1,238 @@
+pragma silverscript ^0.1.0;
+/*
+ * Kaswin SEALED Covenant (V2, Chained Hash / No Routes / No NetworkGenesis)
+ * Language: SilverScript v1.0.0, target commit 3ed973335b59269293564805cc2c58a14595ec03.
+ * Architecture: Hardcoded forward reference to REFUNDING template hash.
+ * No checkRoot; no genesisTail.
+ * Header: 228 bytes (no routes, no networkGenesis). Directory starts at 228.
+ * Spend ABI: action, programTailBytes, nextTail, data, actorPk, fee (6 parameters).
+ * Entry accepts only action 4 or 9; the final else remains an explicit rejection guard.
+ */
+contract KaswinSealed(byte[] initialLedger) {
+    byte[] ledger = initialLedger;
+    int constant HEADER = 228;
+    
+    // Hardcoded forward target template hash:
+    // Placed upon compiling refunding.sil.
+    byte[32] constant REFUNDING_TEMPLATE_HASH = byte[32](0x8547e6b11115a8d7f81e6062719194d467bc1135d9bcf0c91fc87256a84150d6);
+
+    int constant MAX_PURCHASES = 256;
+    int constant DEPOSIT = 20000000;
+    int constant MIN_PRICE = 100000000;
+    int constant FINALIZER = 100000000;
+    int constant MAX_PAY_FEE = 50000000;
+    int constant DRAW_DELAY = 100;
+    int constant TIMEOUT_DELAY = 300;
+    int constant DAA_LIMIT = 500000000000;
+    int constant VALUE_LIMIT = 9000000000000000;
+    byte[32] constant ZERO = byte[32](0x0000000000000000000000000000000000000000000000000000000000000000);
+    byte[32] constant KEY_CTX = byte[32](0x536571436f6d6d69744d65726765736574436f6e746578740000000000000000);
+    byte[32] constant KEY_BRANCH = byte[32](0x536571436f6d6d69746d656e744d65726b6c654272616e636848617368000000);
+
+    function u32(byte[] buf, int at): int {
+        require(at >= 0 && at <= length(buf) - 4);
+        byte[] part = buf.slice(at, at + 4);
+        require(unsigned(part[3]) < 128);
+        return OpBin2Num(part);
+    }
+
+    function u63(byte[] buf, int at): int {
+        require(at >= 0 && at <= length(buf) - 8);
+        byte[] part = buf.slice(at, at + 8);
+        require(unsigned(part[7]) < 128);
+        return OpBin2Num(part);
+    }
+
+    function set4(byte[] buf, int at, int value): byte[] {
+        require(at >= 0 && at <= length(buf) - 4);
+        require(value >= 0 && value <= 2147483647);
+        return buf.slice(0, at) + byte[](value as byte[4]) + buf.slice(at + 4, length(buf));
+    }
+
+    function set8(byte[] buf, int at, int value): byte[] {
+        require(at >= 0 && at <= length(buf) - 8);
+        require(value >= 0);
+        return buf.slice(0, at) + byte[](value as byte[8]) + buf.slice(at + 8, length(buf));
+    }
+
+    function set32(byte[] buf, int at, byte[32] value): byte[] {
+        require(at >= 0 && at <= length(buf) - 32);
+        require(length(byte[](value)) == 32);
+        return buf.slice(0, at) + byte[](value) + buf.slice(at + 32, length(buf));
+    }
+
+    function ownerKey(): pubkey { return pubkey(ledger.slice(196, 228)); }
+
+    function pushLedger(byte[] value): byte[] {
+        int n = length(value);
+        require(n >= HEADER && n <= HEADER + MAX_PURCHASES * 36);
+        byte[] prefix = byte[](0x4d) + byte[](n as byte[4]).slice(0, 2);
+        if (n <= 255) {
+            prefix = byte[](0x4c) + byte[](n as byte[4]).slice(0, 1);
+        }
+        return prefix + value;
+    }
+
+    function scriptFor(byte[] value, byte[] tail): byte[] {
+        return byte[](0x6b) + pushLedger(value) + tail;
+    }
+
+    function authenticatedTail(int tailBytes): byte[] {
+        int sigLen = OpTxInputScriptSigLen(0);
+        require(tailBytes > 0 && tailBytes <= 1000000 && tailBytes < sigLen);
+        byte[] tail = OpTxInputScriptSigSubstr(0, sigLen - tailBytes, sigLen);
+        require(tail.slice(0, 1) == byte[](0x6c));
+        require(tx.inputs[0].scriptPubKey == byte[](new ScriptPubKeyP2SHFromRedeemScript(scriptFor(ledger, tail))));
+        return tail;
+    }
+
+    function recordEnd(byte[] st, int record): int {
+        require(record >= 0 && record < u32(st, 40));
+        int result = u32(st, HEADER + record * 36);
+        require(result > 0 && result <= u32(st, 36));
+        return result;
+    }
+
+    function recordKey(byte[] st, int record): pubkey {
+        require(record >= 0 && record < u32(st, 40));
+        return pubkey(st.slice(HEADER + record * 36 + 4, HEADER + (record + 1) * 36));
+    }
+
+    function checkLedger() {
+        require(ledger.slice(0, 4) == byte[](0x4b573230));
+        require(u32(ledger, 4) == 2);
+        require(length(ledger) == HEADER + u32(ledger, 40) * 36);
+        require(u32(ledger, 36) >= u32(ledger, 24) && tx.inputs[0].value == DEPOSIT + u32(ledger, 36) * u63(ledger, 8));
+    }
+
+    function ordinary(int index, int amount, pubkey recipient) {
+        require(amount > 0 && amount <= VALUE_LIMIT);
+        require(tx.outputs[index].value == amount);
+        require(tx.outputs[index].scriptPubKey == byte[](new ScriptPubKeyP2PK(recipient)));
+        require(OpOutputCovenantId(index) == ZERO);
+    }
+
+    function terminal(int count) {
+        require(tx.outputs.length == count);
+        require(OpAuthOutputCount(0) == 0);
+        require(OpCovOutputCount(OpInputCovenantId(0)) == 0);
+        require(OpOutputCovenantId(0) == ZERO);
+    }
+
+    function successor(byte[] next, byte[] tail, int value) {
+        byte[32] cid = OpInputCovenantId(0);
+        require(length(tail) > 0 && tail.slice(0, 1) == byte[](0x6c));
+        require(templateHash(byte[](0x6b), tail) == REFUNDING_TEMPLATE_HASH);
+        require(OpAuthOutputCount(0) == 1 && OpAuthOutputIdx(0, 0) == 0);
+        require(OpCovOutputCount(cid) == 1 && OpCovOutputIdx(cid, 0) == 0);
+        require(OpOutputCovenantId(0) == cid);
+        require(tx.outputs[0].value == value);
+        require(tx.outputs[0].scriptPubKey == byte[](new ScriptPubKeyP2SHFromRedeemScript(scriptFor(next, tail))));
+    }
+
+    function openSeq(byte[] proof, int base, byte[32] parentSeq): byte[32] {
+        byte[] context = proof.slice(base + 64, base + 88);
+        byte[32] ctx = blake3WithKey(context, KEY_CTX);
+        byte[32] pc = blake3WithKey(byte[](ctx) + proof.slice(base + 32, base + 64), KEY_BRANCH);
+        byte[32] root = blake3WithKey(proof.slice(base, base + 32) + byte[](pc), KEY_BRANCH);
+        return blake3WithKey(byte[](parentSeq) + byte[](root), KEY_BRANCH);
+    }
+
+    function drawState(byte[] proof): byte[] {
+        require(length(proof) == 240);
+        int d = OpTxInputDaaScore(0);
+        require(d >= 0 && d < DAA_LIMIT - TIMEOUT_DELAY);
+        require(this.ageDaa >= DRAW_DELAY);
+        int boundary = d + DRAW_DELAY;
+        {
+            int pd = u63(proof, 224);
+            int td = u63(proof, 104);
+            require(pd < boundary && td >= boundary && td < DAA_LIMIT);
+            require(u63(proof, 112) > u63(proof, 232));
+            require(u63(proof, 96) >= 0 && u63(proof, 216) >= 0);
+        }
+        byte[32] pseq = openSeq(proof, 152, byte[32](proof.slice(120, 152)));
+        byte[32] tseq = openSeq(proof, 32, pseq);
+        byte[32] thash = byte[32](proof.slice(0, 32));
+        require(tseq == OpChainblockSeqCommit(thash));
+        byte[32] frozen = blake2b(ledger.slice(8, 44) + ledger.slice(HEADER, length(ledger)));
+        byte[32] seed = blake2b(byte[]("KASWIN_V2_DRAW")
+            + byte[](OpInputCovenantId(0)) + byte[](tx.inputs[0].outpointTxId)
+            + byte[](tx.inputs[0].outpointIndex as byte[4]) + byte[](frozen)
+            + byte[](boundary as byte[8]) + byte[](thash) + byte[](tseq));
+        byte[] next = set4(ledger, 4, 3);
+        next = set8(next, 48, d);
+        next = set32(next, 56, tx.inputs[0].outpointTxId);
+        next = set4(next, 88, tx.inputs[0].outpointIndex);
+        next = set32(next, 92, seed);
+        next = set32(next, 132, thash);
+        next = set32(next, 164, tseq);
+        return next;
+    }
+
+    function sample(byte[] st): int {
+        byte[32] digest = blake2b(byte[]("KASWIN_V2_SAMPLE") + st.slice(92, 124)
+            + byte[](u32(st, 124) as byte[8]));
+        return OpBin2Num(byte[](digest).slice(0, 7) + byte[](0x00));
+    }
+
+    function limit(byte[] st): int {
+        int space = 72057594037927936;
+        return space - space % u32(st, 36);
+    }
+
+    function acceptedState(byte[] st): byte[] {
+        int value = sample(st);
+        require(value < limit(st));
+        byte[] next = set4(st, 4, 4);
+        return set4(next, 128, (value % u32(st, 36)) + 1);
+    }
+
+    function payout(byte[] st, int hint, pubkey executor, int fee) {
+        require(tx.inputs.length == 1);
+        require(fee <= MAX_PAY_FEE);
+        int ticket = u32(st, 128) - 1;
+        int begin = 0;
+        if (hint > 0) { begin = recordEnd(st, hint - 1); }
+        int end = recordEnd(st, hint);
+        require(begin <= ticket && ticket < end);
+        int prize = u63(st, 8) * u32(st, 36) - FINALIZER - fee;
+        require(prize >= MIN_PRICE);
+        terminal(3);
+        ordinary(0, prize, recordKey(st, hint));
+        ordinary(1, DEPOSIT, ownerKey());
+        ordinary(2, FINALIZER, executor);
+    }
+
+    entry spend(int action, int programTailBytes, byte[] nextTail, byte[] data, pubkey actorPk, int fee) {
+        require(this.activeInputIndex == 0 && tx.version == 1);
+        require(tx.inputs.length >= 1 && tx.inputs.length <= 9);
+        require(tx.outputs.length >= 1 && tx.outputs.length <= 34);
+        require(length(byte[](ownerKey())) == 32 && length(byte[](actorPk)) == 32);
+        byte[32] cid = OpInputCovenantId(0);
+        require(cid != ZERO && OpCovInputCount(cid) == 1 && OpCovInputIdx(cid, 0) == 0);
+        byte[] tail = authenticatedTail(programTailBytes);
+        checkLedger();
+        int phase = u32(ledger, 4);
+
+        require(action == 4 || action == 9);
+        if (action == 4) {
+            require(length(nextTail) == 0);
+            require(phase == 2 && length(data) == 244);
+            byte[] a4Accepted;
+            {
+                byte[] a4Opened = drawState(data.slice(0, 240));
+                a4Accepted = acceptedState(a4Opened);
+            }
+            payout(a4Accepted, u32(data, 240), actorPk, fee);
+        } else if (action == 9) {
+            require(phase == 2 && length(data) == 0);
+            int a9Anchor = OpTxInputDaaScore(0);
+            require(a9Anchor >= 0 && a9Anchor < DAA_LIMIT - TIMEOUT_DELAY);
+            require(this.ageDaa >= TIMEOUT_DELAY);
+            byte[] a9Next = set4(ledger, 4, 5);
+            a9Next = set8(a9Next, 48, a9Anchor);
+            successor(a9Next, nextTail, tx.inputs[0].value);
+        } else { require(false); }
+    }
+}

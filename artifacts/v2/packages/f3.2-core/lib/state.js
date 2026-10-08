@@ -5,7 +5,7 @@ import { blake3 } from './blake3.js';
 import { covenantId, p2sh } from './covenant-id.js';
 export const HEADER = 228, BUSINESS_HEADER = 196, DEPOSIT = 20000000n, MIN_PRICE = 100000000n;
 export const FINALIZER = 100000000n, MAX_PAY_FEE = 50000000n, REFUND_FEE = 1000000n;
-export const DRAW_DELAY = 100n, TIMEOUT_DELAY = 300n, DAA_LIMIT = 500000000000n;
+export const DRAW_DELAY = 100n, TIMEOUT_DELAY = 432000n, DAA_LIMIT = 500000000000n;
 export const MAX_PURCHASES = 256, MAX_TICKETS = 100_000, VALUE_LIMIT = 9000000000000000n;
 export const ZERO = '00'.repeat(32), MODULES = ['open', 'sealed', 'refunding'];
 export var Phase;

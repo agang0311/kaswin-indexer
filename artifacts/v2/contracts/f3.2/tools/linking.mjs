@@ -14,6 +14,7 @@ export const sha256 = b => createHash('sha256').update(b).digest('hex');
 const HASH = /^[0-9a-f]{64}$/;
 export function requireV2Core() {
   assert.equal(S.HEADER, 228, 'Regenerate the V2 core lib/ before linking or loading V2 artifacts');
+  assert.equal(S.TIMEOUT_DELAY, 432000n, 'Regenerate the hardened core lib/; old timeout cannot accompany the new bundle');
   assert.equal(Buffer.from(S.encodeLedger(S.newOpen('00'.repeat(32), {ticketPrice: 100000000n, ticketCap: 3, purchaseCap: 256, minTickets: 3, closeEligibleDaa: 500n}))).subarray(0, 4).toString(), 'KW20');
 }
 export function linkSource(module, source, frames) {
@@ -44,6 +45,9 @@ export async function loadV2Bundle(contractDir) {
     const pin = pins.frames[module];
     assert.deepEqual(pin.dependencies, Object.fromEntries(DEPENDENCIES[module].map(m => [m, frames[m].templateHash])), `${module}: dependency provenance drift`);
     const template = await fs.readFile(path.join(contractDir, `src/${module}.sil`), 'utf8');
+    assert.ok(template.includes('require(totalIn - totalOut == fee);'), `${module}: hardened fee binding missing`);
+    if (module !== 'refunding') assert.ok(template.includes('int constant TIMEOUT_DELAY = 432000;'), `${module}: hardened timeout missing`);
+    else assert.ok(template.includes('ordinary(a10Batch + 1, externalValue + a10Batch * REFUND_FEE - fee, actorPk);'), 'REFUND executor binding missing');
     const linked = await fs.readFile(path.join(contractDir, `artifacts/${module}-linked.sil`), 'utf8');
     const artifact = await fs.readFile(path.join(contractDir, `artifacts/${module}-linked.json`));
     const args = await fs.readFile(path.join(contractDir, `artifacts/${module}-linked.args.json`));

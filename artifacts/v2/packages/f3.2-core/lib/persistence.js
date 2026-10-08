@@ -58,6 +58,42 @@ export class IndexedStore {
             tx.onerror = () => reject(cause ?? tx.error);
         });
     }
+    /** Atomically reserve inputs by validating the journal snapshot and inserting the intent.
+     * All same-object-store readwrite transactions serialize across tabs. Existing records
+     * remain the source of reservations: no migration, duplicated lock table or TTL release. */
+    insertIfAbsentWithCheck(key, value, prefix, inspect) {
+        check(key.startsWith(prefix), 'ATOMIC_INSERT_SCOPE');
+        return new Promise((resolve, reject) => {
+            const tx = this.db.transaction('records', 'readwrite'), store = tx.objectStore('records');
+            const rows = [], result = { revision: 0, value };
+            let cause;
+            const req = store.openCursor();
+            req.onsuccess = () => {
+                try {
+                    const c = req.result;
+                    if (c) {
+                        check(c.key !== key, 'INTENT_ALREADY_EXISTS');
+                        if (typeof c.key === 'string' && c.key.startsWith(prefix))
+                            rows.push({ key: c.key, record: c.value });
+                        c.continue();
+                    }
+                    else {
+                        // Reject accidental async validators; never commit after an unobserved check.
+                        const outcome = inspect(rows);
+                        check(outcome === undefined, 'ATOMIC_CHECK_MUST_BE_SYNCHRONOUS');
+                        store.add(result, key);
+                    }
+                }
+                catch (e) {
+                    cause = e;
+                    tx.abort();
+                }
+            };
+            tx.oncomplete = () => resolve(result);
+            tx.onabort = () => reject(cause ?? tx.error ?? new Error('IDB_ABORT'));
+            tx.onerror = () => reject(cause ?? tx.error);
+        });
+    }
     remove(key, expectedRevision) {
         return new Promise((resolve, reject) => {
             const tx = this.db.transaction('records', 'readwrite'), store = tx.objectStore('records'), r = store.get(key);

@@ -10,11 +10,20 @@ const HASH = /^[0-9a-f]{64}$/;
 const TN10_GENESIS = 'f896a3034873be1739fc4359236899fd3d65d2bc94f9780df0d0da3eb1cc4370';
 const ACTIONS = {81: 'BUY', 82: 'CLOSE', 84: 'DRAW_AND_PAY', 89: 'TIMEOUT_REFUND', 90: 'REFUND'};
 
-export const PROFILE_ID = '206d4ec7072727ae3291726f19c82293b38340a5a7de05d306cf105c4206a9c3';
+export const PROFILE_ID = '7aaf76fe5e2180070290ff984bebaef54e41093e6a77eef24f2b48fb64c159c8';
 export const NETWORK_GENESIS = TN10_GENESIS;
 
-function resolveRepo(repoDir) {
+function resolveRepo(repoDir, profileId) {
   if (repoDir && typeof repoDir === 'string') return path.resolve(repoDir);
+  if (profileId === '206d4ec7072727ae3291726f19c82293b38340a5a7de05d306cf105c4206a9c3') {
+    const candidates = [
+      path.resolve(fileURLToPath(new URL('../../../references/kaswin-v2-206d', import.meta.url))),
+      path.resolve(fileURLToPath(new URL('../artifacts/v2-206d', import.meta.url)))
+    ];
+    for (const c of candidates) {
+      if (fs.existsSync(path.join(c, 'contracts/f3.2/pins.json'))) return c;
+    }
+  }
   if (process.env.KASWIN_V2_REPO) return path.resolve(process.env.KASWIN_V2_REPO);
   const candidates = [
     path.resolve(fileURLToPath(new URL('../../../references/kaswin-v2', import.meta.url))),
@@ -32,7 +41,7 @@ export function actionOf(tx) {
   return typeof script === 'string' && /^[0-9a-f]{2}/i.test(script) ? ACTIONS[parseInt(script.slice(0, 2), 16)] ?? 'UNKNOWN' : 'UNKNOWN';
 }
 export async function create(options = {}, {sdk} = {}) {
-  const repoDir = resolveRepo(options.repoDir);
+  const repoDir = resolveRepo(options.repoDir, options.profileId);
   const o = {repoDir, registryAddresses: [DEFAULT_REGISTRY_ADDRESS], registrationSompi: REGISTRATION_SOMPI, ...options};
   if (!HASH.test(o.profileId ?? '') || o.profileId === '00'.repeat(32)) throw Error('V2_PROFILE_PIN_REQUIRED');
   if (o.networkGenesis !== TN10_GENESIS) throw Error('V2_TN10_PIN_REQUIRED');
@@ -44,9 +53,9 @@ export async function create(options = {}, {sdk} = {}) {
   const {loadV2Bundle} = await load('contracts/f3.2/tools/linking.mjs');
   const {pins, profile} = await loadV2Bundle(path.join(o.repoDir, 'contracts/f3.2'));
   if (profile.id !== o.profileId || pins.networkGenesis !== o.networkGenesis) throw Error('V2_UNPINNED_PROFILE');
-  const [S, P, G, B, H, builders] = await Promise.all(['state', 'protocol', 'genesis-discovery', 'blake3', 'hashes', 'builders'].map(m => load(`packages/f3.2-core/lib/${m}.js`)));
+  const [S, P, G, accepted] = await Promise.all(['state', 'protocol', 'genesis-discovery', 'accepted'].map(m => load(`packages/f3.2-core/lib/${m}.js`)));
   const scope = sdk && o.registryAddresses.length ? registryScope(sdk, o.registryAddresses) : [];
-  const adapter = createV2RoundAdapter({S, P, G, B, H, builders, profile, networkGenesis: o.networkGenesis, registryScope: scope, registrationOf});
+  const adapter = createV2RoundAdapter({S, G, accepted, profile, networkGenesis: o.networkGenesis, registryScope: scope, registrationOf});
   const watch = new Set(scope.map(r => r.address)), fee = BigInt(REGISTRATION_SOMPI);
   const prefix = Buffer.from('KASWIN_GENESIS_V2').toString('hex') + profile.id;
   // A routing/template check only. The engine must establish selected-chain acceptance and hydrate funding before genesis().

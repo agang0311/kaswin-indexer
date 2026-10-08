@@ -1,0 +1,158 @@
+pragma silverscript ^0.1.0;
+/*
+ * Kaswin REFUNDING Covenant (V2, Chained Hash / No Routes / No NetworkGenesis)
+ * Language: SilverScript v1.0.0, target commit 3ed973335b59269293564805cc2c58a14595ec03.
+ * Architecture: Clean leaf template; no external template dependencies.
+ * Direct P2SH continuation on input 0 authenticated tail.
+ * Header: 228 bytes (no routes, no networkGenesis). Directory starts at 228.
+ * Spend ABI: action, programTailBytes, nextTail, data, actorPk, fee (6 parameters).
+ * No checkRoot; no genesisTail; no unused functions or constants.
+ */
+contract KaswinRefunding(byte[] initialLedger) {
+    byte[] ledger = initialLedger;
+    int constant HEADER = 228;
+    
+    int constant MAX_PURCHASES = 256;
+    int constant DEPOSIT = 20000000;
+    int constant REFUND_FEE = 1000000;
+    int constant VALUE_LIMIT = 9000000000000000;
+    byte[32] constant ZERO = byte[32](0x0000000000000000000000000000000000000000000000000000000000000000);
+
+    function u32(byte[] buf, int at): int {
+        require(at >= 0 && at <= length(buf) - 4);
+        byte[] part = buf.slice(at, at + 4);
+        require(unsigned(part[3]) < 128);
+        return OpBin2Num(part);
+    }
+
+    function u63(byte[] buf, int at): int {
+        require(at >= 0 && at <= length(buf) - 8);
+        byte[] part = buf.slice(at, at + 8);
+        require(unsigned(part[7]) < 128);
+        return OpBin2Num(part);
+    }
+
+    function set4(byte[] buf, int at, int value): byte[] {
+        require(at >= 0 && at <= length(buf) - 4);
+        require(value >= 0 && value <= 2147483647);
+        return buf.slice(0, at) + byte[](value as byte[4]) + buf.slice(at + 4, length(buf));
+    }
+
+    function ownerKey(): pubkey { return pubkey(ledger.slice(196, 228)); }
+
+    function pushLedger(byte[] value): byte[] {
+        int n = length(value);
+        require(n >= HEADER && n <= HEADER + MAX_PURCHASES * 36);
+        byte[] prefix = byte[](0x4d) + byte[](n as byte[4]).slice(0, 2);
+        if (n <= 255) {
+            prefix = byte[](0x4c) + byte[](n as byte[4]).slice(0, 1);
+        }
+        return prefix + value;
+    }
+
+    function scriptFor(byte[] value, byte[] tail): byte[] {
+        return byte[](0x6b) + pushLedger(value) + tail;
+    }
+
+    function authenticatedTail(int tailBytes): byte[] {
+        int sigLen = OpTxInputScriptSigLen(0);
+        require(tailBytes > 0 && tailBytes <= 1000000 && tailBytes < sigLen);
+        byte[] tail = OpTxInputScriptSigSubstr(0, sigLen - tailBytes, sigLen);
+        require(tail.slice(0, 1) == byte[](0x6c));
+        require(tx.inputs[0].scriptPubKey == byte[](new ScriptPubKeyP2SHFromRedeemScript(scriptFor(ledger, tail))));
+        return tail;
+    }
+
+    function recordEnd(byte[] st, int record): int {
+        require(record >= 0 && record < u32(st, 40));
+        int result = u32(st, HEADER + record * 36);
+        require(result > 0 && result <= u32(st, 36));
+        return result;
+    }
+
+    function paidTickets(byte[] st): int {
+        int result = 0;
+        int pos = u32(st, 44);
+        if (pos > 0) {
+            result = recordEnd(st, pos - 1);
+        }
+        return result;
+    }
+
+    function checkLedger() {
+        require(ledger.slice(0, 4) == byte[](0x4b573230));
+        require(u32(ledger, 4) == 5);
+        require(length(ledger) == HEADER + u32(ledger, 40) * 36);
+        require(u32(ledger, 44) < u32(ledger, 40));
+        require(tx.inputs[0].value == DEPOSIT + (u32(ledger, 36) - paidTickets(ledger)) * u63(ledger, 8));
+    }
+
+    function ordinary(int index, int amount, pubkey recipient) {
+        require(amount > 0 && amount <= VALUE_LIMIT);
+        require(tx.outputs[index].value == amount);
+        require(tx.outputs[index].scriptPubKey == byte[](new ScriptPubKeyP2PK(recipient)));
+        require(OpOutputCovenantId(index) == ZERO);
+    }
+
+    function terminal(int count) {
+        require(tx.outputs.length == count);
+        require(OpAuthOutputCount(0) == 0);
+        require(OpCovOutputCount(OpInputCovenantId(0)) == 0);
+        require(OpOutputCovenantId(0) == ZERO);
+    }
+
+    function successor(byte[] next, byte[] tail, int value) {
+        byte[32] cid = OpInputCovenantId(0);
+        require(length(tail) > 0 && tail.slice(0, 1) == byte[](0x6c));
+        require(OpAuthOutputCount(0) == 1 && OpAuthOutputIdx(0, 0) == 0);
+        require(OpCovOutputCount(cid) == 1 && OpCovOutputIdx(cid, 0) == 0);
+        require(OpOutputCovenantId(0) == cid);
+        require(tx.outputs[0].value == value);
+        require(tx.outputs[0].scriptPubKey == byte[](new ScriptPubKeyP2SHFromRedeemScript(scriptFor(next, tail))));
+    }
+
+    entry spend(int action, int programTailBytes, byte[] nextTail, byte[] data, pubkey actorPk, int fee) {
+        require(this.activeInputIndex == 0 && tx.version == 1);
+        require(tx.inputs.length >= 1 && tx.inputs.length <= 9);
+        require(tx.outputs.length >= 1 && tx.outputs.length <= 34);
+        require(length(byte[](ownerKey())) == 32 && length(byte[](actorPk)) == 32);
+        byte[32] cid = OpInputCovenantId(0);
+        require(cid != ZERO && OpCovInputCount(cid) == 1 && OpCovInputIdx(cid, 0) == 0);
+        byte[] tail = authenticatedTail(programTailBytes);
+        checkLedger();
+        int phase = u32(ledger, 4);
+
+        require(action == 10);
+        require(length(nextTail) == 0);
+        require(phase == 5 && length(data) == 0);
+        int a10Cursor = u32(ledger, 44);
+        int a10Remaining = u32(ledger, 40) - a10Cursor;
+        int a10Batch = a10Remaining > 32 ? 32 : a10Remaining;
+        int a10NextCursor = a10Cursor + a10Batch;
+        bool a10Last = a10Batch == a10Remaining;
+        int a10First = a10Last ? 0 : 1;
+        int a10PreviousEnd = paidTickets(ledger);
+        int a10InitialEnd = a10PreviousEnd;
+        int a10Price = u63(ledger, 8);
+        int a10Off = HEADER + a10Cursor * 36;
+        for (a10R, 0, a10Batch, 32) {
+            int a10End = OpBin2Num(ledger.slice(a10Off, a10Off + 4));
+            require(a10End > a10PreviousEnd);
+            int a10Idx = a10First + a10R;
+            require(tx.outputs[a10Idx].value == (a10End - a10PreviousEnd) * a10Price - REFUND_FEE);
+            require(tx.outputs[a10Idx].scriptPubKey == byte[](new ScriptPubKeyP2PK(pubkey(ledger.slice(a10Off + 4, a10Off + 36)))));
+            require(OpOutputCovenantId(a10Idx) == ZERO);
+            a10PreviousEnd = a10End;
+            a10Off = a10Off + 36;
+        }
+        int a10Gross = (a10PreviousEnd - a10InitialEnd) * a10Price;
+        require(tx.outputs.length == a10Batch + 2);
+        if (a10Last) {
+            require(a10PreviousEnd == u32(ledger, 36));
+            terminal(a10Batch + 2);
+            ordinary(a10Batch, DEPOSIT, ownerKey());
+        } else {
+            successor(set4(ledger, 44, a10NextCursor), tail, tx.inputs[0].value - a10Gross);
+        }
+    }
+}

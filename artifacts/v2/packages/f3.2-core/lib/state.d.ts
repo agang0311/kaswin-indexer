@@ -1,7 +1,7 @@
 import { type Outpoint, type Spk } from './covenant-id.js';
 export declare const HEADER = 228, BUSINESS_HEADER = 196, DEPOSIT = 20000000n, MIN_PRICE = 100000000n;
 export declare const FINALIZER = 100000000n, MAX_PAY_FEE = 50000000n, REFUND_FEE = 1000000n;
-export declare const DRAW_DELAY = 100n, TIMEOUT_DELAY = 300n, DAA_LIMIT = 500000000000n;
+export declare const DRAW_DELAY = 100n, TIMEOUT_DELAY = 432000n, DAA_LIMIT = 500000000000n;
 export declare const MAX_PURCHASES = 256, MAX_TICKETS = 100000, VALUE_LIMIT = 9000000000000000n;
 export declare const ZERO: string, MODULES: readonly ["open", "sealed", "refunding"];
 export type Module = typeof MODULES[number];

@@ -4,6 +4,16 @@
       "module": "kaswin-v2.mjs",
       "retired": false,
       "options": {
+        "profileId": "7aaf76fe5e2180070290ff984bebaef54e41093e6a77eef24f2b48fb64c159c8",
+        "networkGenesis": "f896a3034873be1739fc4359236899fd3d65d2bc94f9780df0d0da3eb1cc4370",
+        "registryAddresses": ["kaspatest:qztrjpfpuf6g9jw76e6ay909z43hndpv5maqkker6ur4enz7llarsh82ezggl"],
+        "registrationSompi": "5000000"
+      }
+    },
+    {
+      "module": "kaswin-v2.mjs",
+      "retired": true,
+      "options": {
         "profileId": "206d4ec7072727ae3291726f19c82293b38340a5a7de05d306cf105c4206a9c3",
         "networkGenesis": "f896a3034873be1739fc4359236899fd3d65d2bc94f9780df0d0da3eb1cc4370",
         "registryAddresses": ["kaspatest:qztrjpfpuf6g9jw76e6ay909z43hndpv5maqkker6ur4enz7llarsh82ezggl"],

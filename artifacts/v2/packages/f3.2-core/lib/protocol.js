@@ -61,12 +61,12 @@ export function availableActions(x, p) {
 export function transition(x, p, op, fee, external = 0n) {
     const s = S.verifySnapshot(x, p);
     unhex(op.actorKey, 32);
-    check(fee > 0n && fee < S.VALUE_LIMIT, 'NETWORK_FEE');
+    check(fee > 0n && fee <= S.MAX_PAY_FEE, 'NETWORK_FEE');
     check(external >= 0n && external < S.VALUE_LIMIT, 'EXTERNAL_VALUE');
     check(availableActions(x, p).includes(op.action), 'ACTION_NOT_AVAILABLE');
     let next = null, terminal = null, lockTime = 0n, sequence = 0n, data = Z, foreignTail = Z, requiredExternal = fee;
     const payments = [];
-    const pay = (value, key, role) => { check(value > 0n, 'NONPOSITIVE_OUTPUT'); payments.push({ value, spk: p2pk(key), role }); };
+    const pay = (value, key, role) => { check(value > 0n && value <= S.VALUE_LIMIT, 'PAYMENT_VALUE'); payments.push({ value, spk: p2pk(key), role }); };
     const payout = (state) => { check(external === 0n, 'PAY_HAS_EXTERNAL_INPUT'); check(fee <= S.MAX_PAY_FEE, 'PAY_FEE_CAP'); const i = winnerRecord(state), r = S.records(state)[i]; const prize = BigInt(state.sold) * state.config.ticketPrice - S.FINALIZER - fee; check(prize >= S.MIN_PRICE, 'WINNER_MINIMUM'); pay(prize, r.key, 'WINNER'); pay(S.DEPOSIT, state.ownerKey, 'CREATOR'); pay(S.FINALIZER, op.actorKey, 'EXECUTOR'); data = le(BigInt(i), 4); terminal = 'PAID'; requiredExternal = 0n; };
     switch (op.action) {
         case 'BUY': {

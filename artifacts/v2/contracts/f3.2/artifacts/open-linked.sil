@@ -14,14 +14,14 @@ contract KaswinOpen(byte[] initialLedger) {
     
     // Hardcoded forward target template hashes:
     // Placed upon compiling refunding.sil and sealed.sil.
-    byte[32] constant SEALED_TEMPLATE_HASH = byte[32](0xba2f1118738c0c9b0a0d9c4adcfedffacace8f075984912fe7df1bd15aedc546);
-    byte[32] constant REFUNDING_TEMPLATE_HASH = byte[32](0x8547e6b11115a8d7f81e6062719194d467bc1135d9bcf0c91fc87256a84150d6);
+    byte[32] constant SEALED_TEMPLATE_HASH = byte[32](0x6932bc280ccda1c5117caa7308bacc0d71c9fa03e636b4aa5ee90b06045c8762);
+    byte[32] constant REFUNDING_TEMPLATE_HASH = byte[32](0x7c5666912cbb968399cf47fedbcc8a4fb05406c81ae45aa8c25b9723793e784f);
 
     int constant MAX_PURCHASES = 256;
     int constant MAX_TICKETS = 100000;
     int constant DEPOSIT = 20000000;
     int constant MIN_PRICE = 100000000;
-    int constant TIMEOUT_DELAY = 300;
+    int constant TIMEOUT_DELAY = 432000;
     int constant DAA_LIMIT = 500000000000;
     int constant VALUE_LIMIT = 9000000000000000;
     byte[32] constant ZERO = byte[32](0x0000000000000000000000000000000000000000000000000000000000000000);
@@ -101,6 +101,24 @@ contract KaswinOpen(byte[] initialLedger) {
         require(length(ledger) == HEADER + u32(ledger, 40) * 36);
     }
 
+    // Project fee cap, not a Kaspa consensus-wide limit. Read actual UTXOs/outputs.
+    function checkFee(int fee) {
+        require(fee > 0 && fee <= 50000000);
+        int totalIn = 0;
+        int totalOut = 0;
+        for (fi, 0, tx.inputs.length, 9) {
+            int amountIn = tx.inputs[fi].value;
+            require(amountIn > 0 && amountIn <= VALUE_LIMIT);
+            totalIn = totalIn + amountIn;
+        }
+        for (fo, 0, tx.outputs.length, 34) {
+            int amountOut = tx.outputs[fo].value;
+            require(amountOut > 0 && amountOut <= VALUE_LIMIT);
+            totalOut = totalOut + amountOut;
+        }
+        require(totalIn - totalOut == fee);
+    }
+
     function ordinary(int index, int amount, pubkey recipient) {
         require(amount > 0 && amount <= VALUE_LIMIT);
         require(tx.outputs[index].value == amount);
@@ -134,6 +152,7 @@ contract KaswinOpen(byte[] initialLedger) {
         byte[] tail = authenticatedTail(programTailBytes);
         checkRoot(originTxId, originIndex, tail);
         checkLedger();
+        checkFee(fee);
         int phase = u32(ledger, 4);
 
         require(action == 1 || action == 2);

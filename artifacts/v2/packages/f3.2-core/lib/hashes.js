@@ -2,8 +2,7 @@
  * Dependency-free hashes. BLAKE2b keyed mode added for the KIP-20 preimage.
  * New code is differential-tested against Python hashlib; not a cryptographic audit.
  * BLAKE2b has digest-size=32 in its parameter block (NOT truncated BLAKE2b-512).
- * BLAKE3 here deliberately supports keyed inputs <=64 bytes ONLY, sufficient for
- * the KIP-21 opening nodes used below. It is not a general BLAKE3/ABI implementation.
+ * BLAKE3 is implemented only in blake3.ts; no duplicate compression implementation here.
  * Use independently audited hashes/official SDK in a released runtime.
  */
 import { check, fromLe, le, cat } from './bytes.js';
@@ -59,44 +58,5 @@ export function blake2b256(data, key = new Uint8Array(0)) {
             h[i] = h[i] ^ v[i] ^ v[i + 8];
     }
     return cat(...h.slice(0, 4).map(n => le(n, 8)));
-}
-const IV32 = [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19];
-const PERM = [2, 6, 3, 10, 7, 0, 4, 13, 1, 11, 12, 5, 9, 14, 15, 8];
-const rr = (x, n) => ((x >>> n) | (x << (32 - n))) >>> 0;
-export function blake3KeyedNode(data, key) {
-    check(key.length === 32 && data.length <= 64, 'BLAKE3_NODE_SIZE');
-    const keyView = new DataView(key.buffer, key.byteOffset, key.byteLength);
-    const kw = Array.from({ length: 8 }, (_, i) => keyView.getUint32(i * 4, true));
-    const buf = new Uint8Array(64);
-    buf.set(data);
-    const view = new DataView(buf.buffer);
-    let m = Array.from({ length: 16 }, (_, i) => view.getUint32(i * 4, true));
-    // CHUNK_START | CHUNK_END | ROOT | KEYED_HASH; counter=0.
-    const v = [...kw, ...IV32.slice(0, 4), 0, 0, data.length, 1 | 2 | 8 | 16];
-    const g = (a, b, c, d, x, y) => {
-        v[a] = (v[a] + v[b] + x) >>> 0;
-        v[d] = rr(v[d] ^ v[a], 16);
-        v[c] = (v[c] + v[d]) >>> 0;
-        v[b] = rr(v[b] ^ v[c], 12);
-        v[a] = (v[a] + v[b] + y) >>> 0;
-        v[d] = rr(v[d] ^ v[a], 8);
-        v[c] = (v[c] + v[d]) >>> 0;
-        v[b] = rr(v[b] ^ v[c], 7);
-    };
-    for (let r = 0; r < 7; r++) {
-        g(0, 4, 8, 12, m[0], m[1]);
-        g(1, 5, 9, 13, m[2], m[3]);
-        g(2, 6, 10, 14, m[4], m[5]);
-        g(3, 7, 11, 15, m[6], m[7]);
-        g(0, 5, 10, 15, m[8], m[9]);
-        g(1, 6, 11, 12, m[10], m[11]);
-        g(2, 7, 8, 13, m[12], m[13]);
-        g(3, 4, 9, 14, m[14], m[15]);
-        m = PERM.map(i => m[i]);
-    }
-    const out = new Uint8Array(32), ov = new DataView(out.buffer);
-    for (let i = 0; i < 8; i++)
-        ov.setUint32(i * 4, (v[i] ^ v[i + 8]) >>> 0, true);
-    return out;
 }
 //# sourceMappingURL=hashes.js.map

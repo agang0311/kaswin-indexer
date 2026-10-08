@@ -4,7 +4,7 @@ import { blake2b256 } from './hashes.js';
 import { p2pk, p2sh } from './covenant-id.js';
 import { validateTransaction, outpointKey } from './transaction.js';
 import * as S from './state.js';
-import { ACTIONS, transition, actionBudget } from './protocol.js';
+import { ACTIONS, transition, actionBudget, FUNDING_INPUT_BUDGET } from './protocol.js';
 import { REGISTRATION_SOMPI, checkRegistrySpk } from './registry.js';
 export function pushInt(n) {
     check(n >= 0n && n < 1n << 63n, 'SCRIPT_NUMBER');
@@ -52,7 +52,7 @@ export function buildAction(x, p, op, fee, funds, computeBudget, payload = '') {
     tx.lockTime = t.lockTime;
     tx.payload = payload;
     tx.inputs.push({ previousOutpoint: x.tip, signatureScript: witness(x, p, op, t, fee), sequence: t.sequence, computeBudget: budget });
-    tx.inputs.push(...funds.map(f => ({ previousOutpoint: f.outpoint, signatureScript: '', sequence: 0n, computeBudget: 0 })));
+    tx.inputs.push(...funds.map(f => ({ previousOutpoint: f.outpoint, signatureScript: '', sequence: 0n, computeBudget: FUNDING_INPUT_BUDGET })));
     if (t.next)
         tx.outputs.push({ value: S.valueOf(t.next), scriptPublicKey: p2sh(hex(blake2b256(S.scriptOf(t.next, p)))), covenant: { covenantId: x.covenantId, authorizingInput: 0 } });
     tx.outputs.push(...t.payments.map(v => ({ value: v.value, scriptPublicKey: v.spk, covenant: null })));
@@ -67,13 +67,13 @@ export function buildOpenGenesis(p, owner, config, funds, fee, registrySpk) {
     check(funds.length >= 1, 'FUNDING_REQUIRED');
     fundingInputs(funds, owner);
     const total = funds.reduce((a, f) => a + f.value, 0n), registration = registrySpk ? REGISTRATION_SOMPI : 0n;
-    check(fee > 0n && total >= S.DEPOSIT + registration + fee, 'GENESIS_FUNDS');
+    check(fee > 0n && fee <= S.MAX_PAY_FEE && total >= S.DEPOSIT + registration + fee, 'GENESIS_FUNDS');
     const s = S.newOpen(owner, config);
     S.validateLedger(s);
     const script = S.scriptOf(s, p), origin = funds[0].outpoint, cid = S.rootId(origin, script);
     const tx = txBase();
     tx.payload = hex(cat(ascii('KASWIN_GENESIS_V2'), unhex(p.id, 32), S.encodeLedger(s)));
-    tx.inputs = funds.map(f => ({ previousOutpoint: f.outpoint, signatureScript: '', sequence: 0n, computeBudget: 0 }));
+    tx.inputs = funds.map(f => ({ previousOutpoint: f.outpoint, signatureScript: '', sequence: 0n, computeBudget: FUNDING_INPUT_BUDGET }));
     tx.outputs = [{ value: S.DEPOSIT, scriptPublicKey: p2sh(hex(blake2b256(script))), covenant: { covenantId: cid, authorizingInput: 0 } }];
     if (registrySpk)
         tx.outputs.push({ value: REGISTRATION_SOMPI, scriptPublicKey: checkRegistrySpk(registrySpk), covenant: null });
@@ -91,6 +91,10 @@ export function assertDraft(d) {
         check(outpointKey(d.inputUtxos[i].outpoint) === outpointKey(d.transaction.inputs[i].previousOutpoint), 'UTXO_MISMATCH');
     const input = d.inputUtxos.reduce((a, v) => a + v.value, 0n), output = d.transaction.outputs.reduce((a, v) => a + v.value, 0n);
     check(input - output === d.fee && d.fee > 0n, 'FEE_MISMATCH');
-    check(d.transaction.outputs.every(v => v.value > 0n), 'NONPOSITIVE_OUTPUT');
+    check(d.transaction.outputs.every(v => v.value > 0n && v.value <= S.VALUE_LIMIT), 'OUTPUT_VALUE');
+    for (const i of d.authorizedInputIndices) {
+        integer(i, 0, d.transaction.inputs.length - 1);
+        check((d.transaction.inputs[i].computeBudget ?? 0) >= FUNDING_INPUT_BUDGET, 'FUNDING_BUDGET_REQUIRED');
+    }
 }
 //# sourceMappingURL=builders.js.map

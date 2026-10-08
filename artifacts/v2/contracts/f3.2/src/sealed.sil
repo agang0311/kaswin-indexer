@@ -22,7 +22,7 @@ contract KaswinSealed(byte[] initialLedger) {
     int constant FINALIZER = 100000000;
     int constant MAX_PAY_FEE = 50000000;
     int constant DRAW_DELAY = 100;
-    int constant TIMEOUT_DELAY = 300;
+    int constant TIMEOUT_DELAY = 432000;
     int constant DAA_LIMIT = 500000000000;
     int constant VALUE_LIMIT = 9000000000000000;
     byte[32] constant ZERO = byte[32](0x0000000000000000000000000000000000000000000000000000000000000000);
@@ -103,6 +103,23 @@ contract KaswinSealed(byte[] initialLedger) {
         require(u32(ledger, 4) == 2);
         require(length(ledger) == HEADER + u32(ledger, 40) * 36);
         require(u32(ledger, 36) >= u32(ledger, 24) && tx.inputs[0].value == DEPOSIT + u32(ledger, 36) * u63(ledger, 8));
+    }
+
+    function checkFee(int fee) {
+        require(fee > 0 && fee <= MAX_PAY_FEE);
+        int totalIn = 0;
+        int totalOut = 0;
+        for (fi, 0, tx.inputs.length, 9) {
+            int amountIn = tx.inputs[fi].value;
+            require(amountIn > 0 && amountIn <= VALUE_LIMIT);
+            totalIn = totalIn + amountIn;
+        }
+        for (fo, 0, tx.outputs.length, 34) {
+            int amountOut = tx.outputs[fo].value;
+            require(amountOut > 0 && amountOut <= VALUE_LIMIT);
+            totalOut = totalOut + amountOut;
+        }
+        require(totalIn - totalOut == fee);
     }
 
     function ordinary(int index, int amount, pubkey recipient) {
@@ -213,6 +230,7 @@ contract KaswinSealed(byte[] initialLedger) {
         require(cid != ZERO && OpCovInputCount(cid) == 1 && OpCovInputIdx(cid, 0) == 0);
         byte[] tail = authenticatedTail(programTailBytes);
         checkLedger();
+        checkFee(fee);
         int phase = u32(ledger, 4);
 
         require(action == 4 || action == 9);

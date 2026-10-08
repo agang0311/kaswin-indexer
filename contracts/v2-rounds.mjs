@@ -1,6 +1,7 @@
 // V2-only accepted-transition adapter. Locally pinned core/frames; never reinterpret F3 rounds.
 import {wireSpk, sameSpk} from '../src/normalize.mjs';
-export function createV2RoundAdapter({S, P, G, B, H, builders, profile, networkGenesis, registryScope = [], registrationOf = null}) {
+export function createV2RoundAdapter({S, G, accepted, profile, networkGenesis, registryScope = [], registrationOf = null}) {
+  if (typeof accepted?.interpretAccepted !== 'function') throw Error('V2_ACCEPTED_INTERPRETER_REQUIRED');
   const hex = b => Buffer.from(b).toString('hex');
   const eq = (ok, msg) => { if (!ok) throw Error(msg); };
   const bytes = h => { eq(typeof h === 'string' && /^(?:[0-9a-f]{2})*$/i.test(h), 'V2_HEX'); return new Uint8Array(Buffer.from(h, 'hex')); };
@@ -46,57 +47,28 @@ export function createV2RoundAdapter({S, P, G, B, H, builders, profile, networkG
       genesisTransaction: serial(t), latestTxid: id, latestTransaction: serial(t), accepting: b.hash, containing: t.verboseData.blockHash,
       tip: {transactionId: id, index: 0}, origin, cid: c.covenantId, ledger: hex(S.encodeLedger(s)), spk: wireSpk(o.scriptPublicKey), value: String(o.value), utxoDaa: b.daa, terminal: null});
   }
-  function pushes(script) {
-    const data = bytes(script), result = []; let p = 0;
-    eq(data.length <= 250000, 'V2_WITNESS_SIZE');
-    while (p < data.length) {
-      const op = data[p++]; let n;
-      if (op === 0) { result.push(new Uint8Array()); continue; }
-      if (op >= 81 && op <= 96) { result.push(Uint8Array.of(op - 80)); continue; }
-      if (op <= 75) n = op;
-      else if (op >= 76 && op <= 78) {
-        const width = op === 76 ? 1 : op === 77 ? 2 : 4;
-        eq(p + width <= data.length, 'V2_PUSH_HEADER'); n = 0;
-        for (let j = 0; j < width; j++) n += data[p++] * 2 ** (8 * j);
-      } else throw Error('V2_NON_PUSH_WITNESS');
-      eq(p + n <= data.length, 'V2_PUSH_SIZE'); result.push(data.slice(p, p + n)); p += n;
-    }
-    return result;
-  }
-  function integer(data) {
-    eq(data.length <= 8 && (!data.length || !(data.at(-1) & 128)), 'V2_SCRIPT_INT');
-    let n = 0n; for (let i = data.length - 1; i >= 0; i--) n = (n << 8n) + BigInt(data[i]); return n;
-  }
   function advance(r, t, b) {
     eq(r.profileId === profile.id && r.tip && outpoint(t.inputs?.[0]?.previousOutpoint, r.tip), 'V2_ROUND_INPUT');
-    const x = snap(r, b.daa), s = S.verifySnapshot(x, profile), module = S.phaseModule(s.phase), w = pushes(t.inputs[0].signatureScript);
-    eq(w.length === (module === 'open' ? 10 : 8), 'V2_WITNESS_ABI');
-    const action = Object.keys(P.ACTIONS).find(k => BigInt(P.ACTIONS[k]) === integer(w[0])); eq(action, 'V2_UNKNOWN_ACTION');
-    if (module === 'open') eq(hex(w[1]) === r.origin.transactionId && integer(w[2]) === BigInt(r.origin.index), 'V2_ORIGIN_CHANGED');
-    const shift = module === 'open' ? 2 : 0, data = w[3 + shift], fee = integer(w[5 + shift]);
-    const op = {action, actorKey: hex(w[4 + shift])};
-    if (action === 'BUY') { eq(data.length === 4, 'V2_BUY_DATA'); op.quantity = new DataView(data.buffer, data.byteOffset, 4).getUint32(0, true); }
-    if (action === 'DRAW_AND_PAY') {
-      eq(data.length === 244, 'V2_DRAW_DATA'); const opening = data.slice(0, 240);
-      // Node acceptance establishes selected-chain membership; this recomputation alone does not.
-      const branch = (a, c) => B.domainHash('SeqCommitmentMerkleBranchHash', new Uint8Array([...a, ...c]));
-      const seq = (base, parent) => branch(parent, branch(opening.slice(base, base + 32), branch(B.domainHash('SeqCommitMergesetContext', opening.slice(base + 64, base + 88)), opening.slice(base + 32, base + 64))));
-      op.opening = opening; op.accessor = {blockHash: hex(opening.slice(0, 32)), sequenceCommitment: hex(seq(32, seq(152, opening.slice(120, 152))))};
+    const x = snap(r, b.daa);
+    const known = t.inputs[0].verboseData?.utxoEntry;
+    if (known) {
+      eq(BigInt(known.amount) === x.value && sameSpk(wireSpk(known.scriptPublicKey), x.scriptPublicKey) &&
+        known.covenantId === x.covenantId && (known.blockDaaScore == null || BigInt(known.blockDaaScore) === x.utxoDaa), 'V2_SPENT_CONTEXT_MISMATCH');
     }
-    const external = t.outputs.reduce((n, o) => n + BigInt(o.value), 0n) + fee - x.value;
-    const nextState = P.transition(x, profile, op, fee, external);
-    eq(builders.witness(x, profile, op, nextState, fee) === t.inputs[0].signatureScript.toLowerCase(), 'V2_WITNESS_POLICY');
-    eq(BigInt(t.lockTime) === nextState.lockTime && BigInt(t.inputs[0].sequence) === nextState.sequence, 'V2_TIME_FIELDS');
-    const expected = [];
-    if (nextState.next) expected.push({value: S.valueOf(nextState.next), spk: {version: 0, script: 'aa20' + hex(H.blake2b256(S.scriptOf(nextState.next, profile))) + '87'}, cid: r.cid});
-    for (const payment of nextState.payments) expected.push({value: payment.value, spk: payment.spk, cid: null});
-    eq(t.outputs.length === expected.length, 'V2_OUTPUT_COUNT');
-    t.outputs.forEach((o, i) => { const e = expected[i]; eq(BigInt(o.value) === e.value && sameSpk(wireSpk(o.scriptPublicKey), e.spk) &&
-      (e.cid ? o.covenant?.covenantId === e.cid && o.covenant.authorizingInput === 0 : !o.covenant), 'V2_OUTPUT_MISMATCH'); });
+    eq(!t.inputs.slice(1).some(i => i.verboseData?.utxoEntry?.covenantId === r.cid), 'V2_MULTIPLE_FAMILY_INPUTS');
+    // Engine supplies an accepted transaction; previous verified round material is input0 context.
+    // Missing extra input amounts mean unknown fee, never fee inferred from a free witness argument.
+    const tx = {version: t.version, inputs: t.inputs.map(i => ({previousOutpoint: i.previousOutpoint,
+      signatureScript: i.signatureScript.toLowerCase(), sequence: BigInt(i.sequence), computeBudget: i.computeBudget ?? 0})),
+      outputs: t.outputs.map(o => ({value: BigInt(o.value), scriptPublicKey: wireSpk(o.scriptPublicKey), covenant: o.covenant ?? null})),
+      lockTime: BigInt(t.lockTime), subnetworkId: t.subnetworkId, gas: BigInt(t.gas), payload: t.payload ?? '', storageMass: BigInt(t.storageMass ?? 0)};
+    const amounts = t.inputs.map((i, index) => index === 0 ? x.value : i.verboseData?.utxoEntry?.amount == null ? null : BigInt(i.verboseData.utxoEntry.amount));
+    const result = accepted.interpretAccepted(x, profile, tx, amounts.every(v => v !== null) ? amounts : undefined);
     const id = t.verboseData.transactionId;
-    const next = {...r, latestTxid: id, latestTransaction: serial(t), accepting: b.hash, containing: t.verboseData.blockHash, terminal: nextState.terminal,
-      tip: nextState.next ? {transactionId: id, index: 0} : null, ledger: nextState.next ? hex(S.encodeLedger(nextState.next)) : r.ledger,
-      spk: nextState.next ? expected[0].spk : r.spk, value: nextState.next ? expected[0].value.toString() : '0', utxoDaa: b.daa};
+    const next = {...r, latestTxid: id, latestTransaction: serial(t), accepting: b.hash, containing: t.verboseData.blockHash, terminal: result.terminal,
+      tip: result.next ? {transactionId: id, index: 0} : null, ledger: result.next ? hex(S.encodeLedger(result.next)) : r.ledger,
+      spk: result.next ? tx.outputs[0].scriptPublicKey : r.spk, value: result.next ? tx.outputs[0].value.toString() : '0', utxoDaa: b.daa,
+      actualFee: result.fee?.toString() ?? null};
     if (next.tip) S.verifySnapshot(snap(next, b.daa), profile);
     return summary(next);
   }
