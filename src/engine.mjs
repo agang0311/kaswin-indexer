@@ -366,17 +366,28 @@ export class Engine {
       if (rec && await this.liveUtxo(rec.address, rec.data.tip)) throw Error('TERMINAL_BUT_TIP_STILL_LIVE');
       utxoCheck = 'TERMINAL_OLD_TIP_GONE';
     }
-    const now = this.now(), seq = this.store.lastSeq(next.id) + 1;
+    const now = this.now();
+    let seq = null;
     const transition = {txid: chosen.txid, roundId: next.id, contract, seq, kind, status: 'ACCEPTED', accepting: acc.hash, acceptingDaa: acc.daa,
       acceptingBlueScore: acc.blueScore, containing: chosen.containing, previous: rec?.data ?? null, next,
       evidence: {source: chosen.source, utxoCheck, witnessSource: chosen.source === 'mempool' ? 'MEMPOOL_COPY_TXID_MATCH' : 'BLOCK_BODY'}, observedAt: now};
+    // Idempotent: a txid already applied to this round (e.g. a concurrent discovery of the same Genesis) is not re-applied.
+    let duplicate = null;
     this.store.tx(() => {
+      duplicate = this.store.activeTransition(next.id, chosen.txid);
+      if (duplicate) return;
+      transition.seq = seq = this.store.lastSeq(next.id) + 1;      // allocated inside the write transaction
       this.store.putRound(next, nextAddress, now, contract);
       if (utxoCheck === 'SUCCESSOR_LIVE_MATCHES') this.store.markLiveSeen(next.id, now);
       this.store.addTransition(transition);
       if (kind === 'GENESIS') this.store.discoveryResult(next.id, 'APPLIED', now);
       this.store.enqueue(this.relayPayload('transition', transition, nextAddress), now);
     });
+    if (duplicate) {
+      if (nextAddress) await this.unsubscribe(nextAddress);          // balance the subscribe above
+      this.store.log('DUPLICATE_SKIPPED', {round: next.id, txid: chosen.txid, existingSeq: duplicate.seq}, now);
+      return 'KNOWN';
+    }
     if (rec?.address && rec.status === 'LIVE') await this.unsubscribe(rec.address);
     this.store.log('APPLIED', {round: next.id, seq, kind, txid: chosen.txid, accepting: acc.hash, utxoCheck}, now);
     if (next.tip && utxoCheck !== 'SUCCESSOR_LIVE_MATCHES') this.run('spend:' + next.id, () => this.resolveSpend(next.id));

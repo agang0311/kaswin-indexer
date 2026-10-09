@@ -86,8 +86,14 @@ if (cmd === 'track') {
   const [txid, start] = rest;
   if (!/^[0-9a-f]{64}$/.test(txid ?? '') || !/^[0-9a-f]{64}$/.test(start ?? '')) throw Error('usage: track GENESIS_TXID START_CHAIN_HASH');
   await engine.start();
-  log('TRACK', await engine.discoverGenesis(txid, {starts: [start], contract: o.contract ?? null}));
+  // Serialize with retryPending()/event work queued by start(): never call engine work outside Engine.run.
+  let result = 'NOT_RUN', failure = null;
+  await engine.run('track:' + txid, async () => {
+    try { result = await engine.discoverGenesis(txid, {starts: [start], contract: o.contract ?? null}); } catch (e) { failure = e; throw e; }
+  });
   await engine.idle();
+  log('TRACK', failure ? 'FAILED ' + String(failure?.message ?? failure) : result);
+  if (failure) { await node.close(); store.close(); process.exit(1); }
   await node.close(); store.close(); process.exit(0);
 }
 

@@ -38,6 +38,11 @@ export class Store {
       this.db.prepare('UPDATE rounds SET contract=? WHERE contract IS NULL').run(defaultContract);
       this.db.prepare('UPDATE transitions SET contract=? WHERE contract IS NULL').run(defaultContract);
     }
+    // One accepted transaction is applied to a round at most once. Rolled-back rows stay as history, so a reorg replay
+    // (ROLLED_BACK + FINAL with the same txid) remains valid. Fails closed if an existing DB already holds active duplicates.
+    const dup = this.db.prepare("SELECT round_id, txid FROM transitions WHERE status!='ROLLED_BACK' GROUP BY round_id, txid HAVING COUNT(*)>1 LIMIT 1").get();
+    if (dup) throw Error(`ACTIVE_DUPLICATE_TRANSITION ${dup.round_id} ${dup.txid}: resolve manually before upgrading`);
+    this.db.exec("CREATE UNIQUE INDEX IF NOT EXISTS transitions_active_txid ON transitions(round_id, txid) WHERE status!='ROLLED_BACK'");
   }
   tx(fn) {
     this.db.exec('BEGIN IMMEDIATE');
@@ -69,10 +74,10 @@ export class Store {
     return this.db.prepare("SELECT * FROM rounds WHERE json_extract(data,'$.cid')=? AND status!='ROLLED_BACK' LIMIT 2").all(cid).map(rowRound);
   }
   cidPage(after, limit, category = null) {
-    const bucket = `CASE WHEN status='STALE' OR contract NOT LIKE 'kaswin-f3@%' THEN 'unknown'
+    const bucket = `CASE WHEN status='STALE' OR (contract NOT LIKE 'kaswin-f3@%' AND contract NOT LIKE 'kaswin-v2@%') THEN 'unknown'
       WHEN status='TERMINAL' THEN 'close'
       WHEN json_extract(data,'$.state.phase')=1 THEN 'open'
-      WHEN json_extract(data,'$.state.phase') IN (2,3,4) THEN 'sealed'
+      WHEN json_extract(data,'$.state.phase')=2 OR (contract LIKE 'kaswin-f3@%' AND json_extract(data,'$.state.phase') IN (3,4)) THEN 'sealed'
       WHEN json_extract(data,'$.state.phase')=5 THEN 'close' ELSE 'unknown' END`;
     return this.db.prepare(`SELECT * FROM rounds WHERE json_extract(data,'$.cid')>? AND status!='ROLLED_BACK'
       AND (? IS NULL OR (${bucket})=?) ORDER BY json_extract(data,'$.cid'),id LIMIT ?`).all(after, category, category, limit).map(rowRound);
@@ -88,6 +93,11 @@ export class Store {
   }
   markLiveSeen(id, at) { this.db.prepare('UPDATE rounds SET live_seen_at=? WHERE id=?').run(at, id); }
 
+  /** The active (non-rolled-back) transition that already applied `txid` to `roundId`, if any. */
+  activeTransition(roundId, txid) {
+    const r = this.db.prepare("SELECT * FROM transitions WHERE round_id=? AND txid=? AND status!='ROLLED_BACK'").get(roundId, txid);
+    return r ? rowTransition(r) : null;
+  }
   lastSeq(roundId) { return this.db.prepare('SELECT MAX(seq) s FROM transitions WHERE round_id=?').get(roundId)?.s ?? -1; }
   addTransition(t) {
     this.db.prepare(`INSERT INTO transitions(txid,round_id,contract,seq,kind,status,accepting,accepting_daa,accepting_blue_score,containing,previous,next,evidence,observed_at)
