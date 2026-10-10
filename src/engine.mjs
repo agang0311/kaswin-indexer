@@ -1,6 +1,7 @@
 // Event-driven covenant-lineage follower core (contract rules come from plugins, see contracts.mjs). RPC-agnostic (a `node` object is injected) so it is testable offline.
 // Truth = selected-chain acceptance + covenant rules. This cache never decides entitlement.
 import {checkRound} from './contracts.mjs';
+import {scanWindow, spendsOutpoint} from './window-scan.mjs';
 import {canonical, outpointKey, spends, relatedTransaction, isFullTransaction, prepareTransaction, normalizeUtxo, sameSpk, wireSpk, txidOf} from './normalize.mjs';
 
 export const DEFAULTS = Object.freeze({
@@ -10,9 +11,6 @@ export const DEFAULTS = Object.freeze({
   // No fixed page cap: measured ~200 blocks/s getBlocks (~20x TN10 production) and ~1,900 chain blocks/s v1 VC,
   // so a scan always converges to the sink. Only a wall-clock budget stops it (then PENDING and retry).
   scanBudgetMs: 600000,
-  getBlocksFullPage: 249,         // fixed source: mergeset_size_limit + 1 on TN10
-  pageCacheMs: 20000,
-  pageCacheMax: 6,               // VPS has 705 MB RAM; a full page decodes to tens of MB of JS objects
   finalityBlueScore: 600n,        // project policy, NOT a consensus finality rule
   genesisLookbackMs: 30000,
   nearCheckpointMs: 15000,
@@ -22,6 +20,13 @@ export const DEFAULTS = Object.freeze({
   fastLookbackMs: 10000,
   fastMaxAgeMs: 30000,            // older start -> page too large for the 192 MB heap (VPS); use slow path
   fastMaxPages: 2,
+  // Bounded fallback (2026-10-10): accepted-transaction pages of at most this many blue score, one page in memory at a
+  // time (measured TN10 under load: ~100 blue = 60 chain blocks, ~1.7 MB JSON, ~30 ms). Replaces the getBlocks body scan
+  // whose 6+ MB pages (plus cache) exhausted the 192 MB VPS heap when started hours back (2026-10-09 incident).
+  windowBlue: 100n,
+  windowSliceMs: 20000,           // max time one resolveSpend holds the serial queue in the window walk
+  windowWorkerHeapMb: 96,        // child process heap cap; measured adaptive-page heap peak ~54 MB in a spam burst
+  windowWorkerPages: 200,        // pages per child process (one process = one memory high-water, then returned)
   pendingMaxMs: 15 * 60 * 1000,
 });
 
@@ -36,7 +41,6 @@ export class Engine {
     this.scheduled = new Set();
     this.pending = new Map();       // key -> {since, kind, id, hint}
     this.errors = 0;
-    this.pageCache = new Map();     // lowHash -> {at, r}
   }
 
   // ---------- lifecycle ----------
@@ -54,7 +58,9 @@ export class Engine {
   async resubscribeAll() {
     const addrs = [...this.subs.keys()];
     if (addrs.length) await this.node.subscribeUtxosChanged(addrs);
+    if (this.chainSubscribed && this.node.subscribeVirtualChainChanged) { try { await this.node.subscribeVirtualChainChanged(); } catch {} }
     await this.reconcile();
+    await this.checkFinality();   // reorgs that happened while disconnected
   }
   run(key, fn) {
     if (this.scheduled.has(key)) return this.queue;
@@ -90,7 +96,7 @@ export class Engine {
     const tips = new Map(this.store.rounds({liveOnly: true}).map(r => [outpointKey(r.data.tip), r.id]));
     for (const raw of data?.removed ?? []) {
       const u = normalizeUtxo(raw), id = tips.get(outpointKey(u.outpoint));
-      if (id) { this.store.log('SPENT_EVENT', {round: id, outpoint: u.outpoint}, at); this.run('spend:' + id, () => this.resolveSpend(id, at)); }
+      if (id) { this.store.log('SPENT_EVENT', {round: id, outpoint: u.outpoint}, at); this.store.markTipSpent(id, u.outpoint, at); this.run('spend:' + id, () => this.resolveSpend(id, at)); }
     }
     for (const raw of data?.added ?? []) {
       const u = normalizeUtxo(raw);
@@ -171,7 +177,10 @@ export class Engine {
   /** Newest checkpoint recorded before `eventAt - fastLookbackMs`, if recent enough for a small page. */
   fastStart(eventAt) {
     const cp = this.store.checkpointsBefore(eventAt - this.config.fastLookbackMs, 1)[0];
-    return cp && eventAt - cp.at <= this.config.fastMaxAgeMs ? cp.sink : null;
+    // Age is checked against NOW as well: a deferred spend is retried every 5 s with its original eventAt, and the Full
+    // page from that fixed checkpoint grows ~10 chain blocks/s (measured 2026-10-10: 400 blocks = +134 MB RSS; retries
+    // pushed the VPS-limit replay to 340 MB). Retries past the window use the bounded window walk instead.
+    return cp && eventAt - cp.at <= this.config.fastMaxAgeMs && this.now() - cp.at <= this.config.fastMaxAgeMs ? cp.sink : null;
   }
   /**
    * Walk the virtual selected chain from `start` with V2 Full and return the first accepted transaction matching `match`.
@@ -205,6 +214,75 @@ export class Engine {
     }
     return null;
   }
+  /**
+   * Bounded fallback: find the accepted spender of `tip` on the selected chain after `start`, in windows of <= windowBlue
+   * blue score (V2 High; version/lockTime are hydrated from the containing block afterwards). Returns {acc, tx, containing}
+   * or null when scanned up to the sink observed at call time. Runs at most windowSliceMs per call so the serial engine
+   * queue (events, reorg rollbacks, other rounds) is never held for long: then it saves a durable per-start cursor under
+   * `resumeKey` and throws WINDOW_SCAN_CONTINUES; the caller defers and the 5 s retry resumes from the cursor. Throws
+   * WINDOW_START_NOT_CHAIN if `start` left the selected chain. Nothing is guessed.
+   * With a URL-addressable node the walk runs in short-lived child processes of at most windowWorkerPages pages each
+   * (memory returned on exit, see window-scan.mjs); otherwise in-process (tests, resolver mode).
+   */
+  async windowFind(tip, start, resumeKey = null) {
+    const sinkBlue = BigInt((await this.node.getSinkBlueScore()).blueScore), until = this.now() + this.config.windowSliceMs;
+    // Resume an earlier slice: cursors are kept per start; used only if still a selected-chain block, else start over.
+    // A cursor is a position hint only, never evidence.
+    const saved = resumeKey ? this.store.getMeta(resumeKey)?.[start] : null;
+    let cur = {from: start, fromBlue: (await this.header(start)).blueScore};
+    if (typeof saved?.from === 'string') {
+      try { const h = await this.header(saved.from); if (h.isChain) cur = {from: saved.from, fromBlue: h.blueScore, w: saved.w ? BigInt(saved.w) : null}; } catch {}
+    }
+    const save = v => {
+      if (!resumeKey) return;
+      const all = {...(this.store.getMeta(resumeKey) ?? {})};
+      if (v) all[start] = v; else delete all[start];
+      this.store.setMeta(resumeKey, Object.keys(all).length ? all : null);
+    };
+    const mark = () => save({from: cur.from, w: cur.w != null ? String(cur.w) : null, at: this.now()});
+    for (;;) {
+      if (this.now() > until) { mark(); throw Error('WINDOW_SCAN_CONTINUES'); }
+      const args = {tip, ...cur, sinkBlue, windowBlue: this.config.windowBlue};
+      let r;
+      try {
+        r = this.node.url && this.config.windowWorkerPages
+          ? await this.windowChunk({...args, url: this.node.url, network: this.config.network, maxPages: this.config.windowWorkerPages, budgetMs: Math.max(1, until - this.now())})
+          : await scanWindow(this.node, {match: t => spendsOutpoint(t, tip), ...cur, sinkBlue, windowBlue: this.config.windowBlue, until, now: this.now});
+      } catch (e) {
+        if (/WINDOW_START_NOT_CHAIN/.test(String(e?.message))) save(null); else mark();
+        throw e;
+      }
+      if (r.found) return r.found;
+      if (r.done) { save(null); return null; }
+      cur = r.cursor; mark();
+    }
+  }
+  /**
+   * One chunk in a short-lived child process (bigint fields cross as strings). A process, not a worker thread: measured
+   * 2026-10-10, repeated worker threads left the parent at 391 MB RSS (freed native memory not returned to the OS),
+   * above the unit's MemoryMax=320M; a child process returns everything on exit. Rejects with the child's error.
+   */
+  async windowChunk(a) {
+    const {fork} = await import('node:child_process');
+    const child = fork(new URL('./window-worker.mjs', import.meta.url), [], {
+      execArgv: [`--max-old-space-size=${this.config.windowWorkerHeapMb}`], stdio: ['ignore', 'ignore', 'pipe', 'ipc'],
+      env: {...process.env, NODE_NO_WARNINGS: '1'}, serialization: 'json'});
+    let stderr = '';
+    child.stderr.on('data', d => { if (stderr.length < 400) stderr += d; });
+    let settle;
+    const done = new Promise((resolve, reject) => { settle = {resolve, reject}; });
+    // Permanent listeners: an error/exit after settling must never become unhandled.
+    const timer = setTimeout(() => settle.reject(Error('WINDOW_WORKER_TIMEOUT')), a.budgetMs + 30_000);
+    child.on('message', x => settle.resolve(x));
+    child.on('error', e => settle.reject(Error('WINDOW_WORKER_' + (e?.code ?? 'ERROR'))));
+    child.on('exit', (code, sig) => settle.reject(Error(`WINDOW_WORKER_EXIT_${code ?? sig}${/heap out of memory/i.test(stderr) ? '_OOM' : ''}`)));
+    try {
+      child.send({...a, fromBlue: String(a.fromBlue), sinkBlue: String(a.sinkBlue), windowBlue: String(a.windowBlue), w: a.w != null ? String(a.w) : null});
+      const m = await done;
+      if (!m.ok) throw Error(m.message);
+      return reviveWindow(m.r);
+    } finally { clearTimeout(timer); if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL'); }
+  }
   async tryFast(label, match, start) {
     if (!start) return null;
     try { return await this.fastFind(match, start); }
@@ -226,48 +304,6 @@ export class Engine {
       if (txidOf(tx)) out.set(txidOf(tx), {txid: txidOf(tx), tx, containing: null, source: 'mempool'});
     }
     return [...out.values()];
-  }
-  async fromBlocks(starts, tip, cid = null) {
-    const sink = String((await this.node.getBlockDagInfo()).sink);
-    const sinkScore = BigInt((await this.node.getSinkBlueScore()).blueScore);
-    for (const start of starts) {
-      const out = new Map();
-      let low = start, pages = 0;
-      try {
-        const until = this.now() + this.config.scanBudgetMs;
-        for (;;) {
-          if (this.now() > until) throw Error('GETBLOCKS_SCAN_BUDGET_EXCEEDED');
-          pages++;
-          const r = await this.blocksPage(low);
-          for (const b of r.blocks ?? []) for (const t of b.transactions ?? []) {
-            if (!relatedTransaction(t, tip, cid) || !spends(t, tip) || !txidOf(t) || out.has(txidOf(t))) continue;
-            const hash = b.verboseData?.hash ?? b.header?.hash;
-            const tx = prepareTransaction(t, hash);
-            out.set(txidOf(tx), {txid: txidOf(tx), tx, containing: hash, source: 'getBlocks', start});
-          }
-          const hashes = (r.blockHashes ?? []).map(String);
-          const top = (r.blocks ?? []).reduce((m, b) => { const v = BigInt(b.header?.blueScore ?? 0); return v > m ? v : m; }, 0n);
-          if (out.size || hashes.includes(sink) || hashes.length <= 1 || hashes.at(-1) === low || top >= sinkScore) break;
-          low = hashes.at(-1);
-        }
-        if (out.size) return [...out.values()];     // empty: try the next (older) start
-      } catch (e) { this.store.log('GETBLOCKS_FAILED', {start, message: String(e?.message ?? e)}, this.now()); }
-    }
-    return [];
-  }
-  /**
-   * Shared page cache: several rounds spent in the same window scan the same range once. Only pages that did not
-   * reach the tip are cached (their content is fixed: antipast-ordered bodies above lowHash up to a full batch).
-   */
-  async blocksPage(low) {
-    const hit = this.pageCache.get(low), now = this.now();
-    if (hit && now - hit.at < this.config.pageCacheMs) return hit.r;
-    const r = await this.node.getBlocks({lowHash: low, includeBlocks: true, includeTransactions: true});
-    if ((r.blockHashes?.length ?? 0) >= this.config.getBlocksFullPage) {
-      this.pageCache.set(low, {at: now, r});
-      for (const [k, v] of this.pageCache) if (now - v.at >= this.config.pageCacheMs || this.pageCache.size > this.config.pageCacheMax) this.pageCache.delete(k);
-    }
-    return r;
   }
   async header(hash) {
     const b = (await this.node.getBlock({hash, includeTransactions: false})).block;
@@ -312,10 +348,51 @@ export class Engine {
     return hit ?? null;
   }
 
+  /** The latest ROLLED_BACK transition that spent the current live tip: after a selected-chain reorg its spender is the
+   * prime candidate on the new chain. Durable (read from the DB), so it survives a restart. */
+  rolledBackSpend(rec) {
+    const tip = outpointKey(rec.data.tip);
+    return this.store.transitions(rec.id).filter(t => t.status === 'ROLLED_BACK' && t.previous?.tip && outpointKey(t.previous.tip) === tip &&
+      t.next?.latestTransaction && t.next.latestTxid === t.txid).at(-1) ?? null;
+  }
+  /** First selected-chain block at or above `hash` by selected parents (bounded). Null if not found within the bound. */
+  async chainAncestor(hash, limit = 256) {
+    for (let i = 0; i < limit && hash; i++) {
+      const h = await this.header(hash);
+      if (h.isChain) return hash;
+      hash = h.selectedParent;
+    }
+    return null;
+  }
+  /**
+   * Re-resolution after a rollback. The rolled-back spender was accepted in a block whose selected-chain ancestor `start`
+   * is still on the chain, and the tip was unspent at `start`; so every spender on the current chain comes after `start`.
+   * Check the known spender with the light v1 acceptance scan (ids only) from `start`; never fall back to a getBlocks scan
+   * from the round's own (possibly hours old) accepting block, which exhausts the VPS heap under load (2026-10-09 incident).
+   */
+  async replayRolledBack(rec, hint) {
+    const start = await this.chainAncestor(hint.accepting);
+    if (!start) return {start: null};
+    const acc = await this.acceptance(hint.txid, [start]);
+    if (!acc) return {start};
+    const tx = prepareTransaction(hint.next.latestTransaction);
+    if (txidOf(tx) !== hint.txid || !isFullTransaction(tx) || !spends(tx, rec.data.tip)) throw Error('ROLLED_BACK_SPENDER_INVALID');
+    this.store.log('ROLLBACK_REPLAY', {round: rec.id, txid: hint.txid, from: start, accepting: acc.hash}, this.now());
+    const chosen = await this.bindAccepted({txid: hint.txid, tx, containing: null, source: 'rolled-back-replay'}, acc);
+    return {start, applied: await this.applySpend(rec, chosen, acc)};
+  }
+
   async resolveSpend(roundId, eventAt = this.now()) {
     const rec = this.store.round(roundId);
     if (!rec || rec.status !== 'LIVE') return 'NOT_LIVE';
     const tip = rec.data.tip;
+    let replayStart = null;
+    const hint = this.rolledBackSpend(rec);
+    if (hint) {
+      const r = await this.replayRolledBack(rec, hint);
+      if (r.applied) { this.pending.delete('spend:' + roundId); return r.applied; }
+      replayStart = r.start;
+    }
     const fast = await this.tryFast('spend:' + roundId, t => spendsLoose(t, tip), this.fastStart(eventAt));
     if (fast) {
       this.pending.delete('spend:' + roundId);
@@ -323,9 +400,33 @@ export class Engine {
       if (!isFullTransaction(tx)) throw Error('CANDIDATE_MISSING_CONSENSUS_FIELDS');
       return this.applySpend(rec, {txid: txidOf(tx), tx, containing: fast.containing, source: 'vc-full'}, fast.acc);
     }
-    const starts = this.startsFor(rec, eventAt);
+    const starts = replayStart ? [replayStart] : this.startsFor(rec, eventAt);
     let candidates = await this.fromMempool(rec.address, tip, rec.data.cid);
-    if (!candidates.length) candidates = await this.fromBlocks(starts, tip, rec.data.cid);
+    if (!candidates.length) {
+      // Bounded accepted-chain walk (replaces the getBlocks body scan): newest start first, older starts only if needed.
+      let failed = 0;
+      for (const hint of starts) {
+        let w;
+        // A start that left the selected chain (reorged checkpoint) is replaced by its selected-chain ancestor: that block
+        // is in its past, so it still precedes the spend and the scan from it is a superset.
+        const start = await this.chainAncestor(hint).catch(() => null);
+        if (!start) { failed++; this.store.log('WINDOW_SCAN_FAILED', {start: hint, message: 'NO_CHAIN_ANCESTOR'}, this.now()); continue; }
+        try { w = await this.windowFind(tip, start, `window:${roundId}`); }
+        catch (e) {
+          const message = String(e?.message ?? e);
+          // A slice ended with progress saved: yield the queue now and resume this same start on the next retry.
+          if (message === 'WINDOW_SCAN_CONTINUES') return this.defer('spend:' + roundId, {kind: 'spend', id: roundId}, 'WINDOW_SCAN_CONTINUES');
+          failed++; this.store.log('WINDOW_SCAN_FAILED', {start, message}, this.now()); continue;
+        }
+        if (!w) continue;
+        this.pending.delete('spend:' + roundId); this.store.setMeta(`window:${roundId}`, null);   // all starts' cursors
+        let tx = {...w.tx, verboseData: {...w.tx.verboseData, blockHash: w.containing}}, source = 'vc-window';
+        if (!isFullTransaction(tx)) { tx = await this.hydrate(tx); source += '+block'; }
+        const chosen = await this.bindAccepted({txid: txidOf(tx), tx, containing: w.containing, source}, w.acc);
+        return this.applySpend(rec, chosen, w.acc);
+      }
+      if (failed === starts.length) return this.defer('spend:' + roundId, {kind: 'spend', id: roundId}, 'WINDOW_SCAN_FAILED');
+    }
     if (!candidates.length) {
       const live = await this.liveUtxo(rec.address, tip);
       if (live) { this.store.markLiveSeen(roundId, this.now()); this.pending.delete('spend:' + roundId); return 'STILL_LIVE'; }
@@ -565,7 +666,6 @@ export class Engine {
   async rollback(t) {
     const undo = this.store.activeAfter(t.roundId, t.seq), now = this.now();
     if (!undo.length) return;
-    this.pageCache.clear(); // Never reuse cached bodies across an observed selected-chain rollback.
     const current = this.store.round(t.roundId), prev = t.previous;
     const prevAddress = prev?.tip ? this.addressOf(prev.spk) : null;
     this.store.tx(() => {
@@ -585,6 +685,39 @@ export class Engine {
     else this.run('genesis:' + t.roundId, () => this.discoverGenesis(t.roundId, {starts: this.store.checkpointsBefore(t.observedAt, this.config.checkpointsPerSearch).map(c => c.sink)}));
   }
 
+  /**
+   * Reorg fast path (2026-10-10): the node reported selected-chain blocks removed. Roll back, at once, every non-final
+   * transition whose accepting block is among them (the periodic checkFinality would find it within 60 s). The removed
+   * hash list is all that is used: no block bodies are fetched. Each rollback re-resolves through resolveSpend, which
+   * replays the rolled-back spender from its still-chain ancestor first (see replayRolledBack).
+   */
+  onChainChanged(removed) {
+    if (!Array.isArray(removed) || !removed.length) return;
+    // TN10 delivers ~1.5 events/s with removed blocks (measured 2026-10-10: 88 of 550 events in 60 s, max 5 removed).
+    // Match against an in-memory set of non-final accepting hashes (refreshed on change); no DB/RPC unless one matches.
+    const watched = this.watchedAccepting();
+    const gone = new Set(removed.map(String).filter(h => watched.has(h)));
+    if (!gone.size) return;
+    const hit = this.store.unfinalized().filter(t => gone.has(t.accepting));
+    if (!hit.length) return;
+    this.store.log('REORG_EVENT', {removed: removed.length, transitions: hit.map(t => ({round: t.roundId, seq: t.seq, txid: t.txid}))}, this.now());
+    this.run('reorg:' + removed[0], async () => {
+      const rolled = new Set();
+      for (const t of this.store.unfinalized().filter(x => gone.has(x.accepting))) {
+        if (rolled.has(t.roundId)) continue;
+        const h = await this.header(t.accepting);              // confirm on the node, never trust the event alone
+        if (!h.isChain) { await this.rollback(t); rolled.add(t.roundId); }
+      }
+    });
+  }
+
+  /** Accepting hashes of non-final transitions, cached until the transitions table changes (commit/rollback/finality). */
+  watchedAccepting() {
+    const v = this.store.db.prepare("SELECT COUNT(*) n, MAX(rowid) m, SUM(status='ACCEPTED') a FROM transitions").get(), key = `${v.n}:${v.m}:${v.a}`;
+    if (this.watchKey !== key) { this.watchKey = key; this.watchSet = new Set(this.store.unfinalized().map(t => t.accepting)); }
+    return this.watchSet;
+  }
+
   /** Missed-notification safety net: one batched UTXO query for every live round. */
   async reconcile() {
     const live = this.store.rounds({liveOnly: true});
@@ -594,7 +727,7 @@ export class Engine {
     const now = this.now();
     for (const x of live) {
       if (present.has(outpointKey(x.data.tip))) this.store.markLiveSeen(x.id, now);
-      else this.run('spend:' + x.id, () => this.resolveSpend(x.id));
+      else { this.store.markTipSpent(x.id, x.data.tip, now); this.run('spend:' + x.id, () => this.resolveSpend(x.id)); }
     }
   }
 
@@ -611,6 +744,12 @@ export class Engine {
 }
 
 /** Tip-spend match on raw RPC rows (index may arrive as number or bigint; hash case normalized). */
+/** Worker results come back via structured clone with bigint fields as strings (the worker keeps them as bigint here). */
+function reviveWindow(r) {
+  if (r.found) r.found.acc = {...r.found.acc, daa: BigInt(r.found.acc.daa), blueScore: BigInt(r.found.acc.blueScore)};
+  if (r.cursor) r.cursor = {from: String(r.cursor.from), fromBlue: BigInt(r.cursor.fromBlue), w: r.cursor.w != null ? BigInt(r.cursor.w) : null};
+  return r;
+}
 function spendsLoose(tx, tip) {
   return Array.isArray(tx?.inputs) && tx.inputs.some(i => i?.previousOutpoint &&
     String(i.previousOutpoint.transactionId).toLowerCase() === tip.transactionId && Number(i.previousOutpoint.index) === Number(tip.index));

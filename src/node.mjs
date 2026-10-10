@@ -6,10 +6,16 @@ export async function openNode(sdk, {network = 'testnet-10', url = null, resolve
   if (url && resolverUrls) throw Error('URL_AND_RESOLVER_ARE_EXCLUSIVE');
   const resolver = url ? undefined : new sdk.Resolver(resolverUrls ? {urls: resolverUrls, ...(tls === undefined ? {} : {tls})} : undefined);
   const rpc = new sdk.RpcClient(url ? {url, networkId: network, encoding: sdk.Encoding.Borsh} : {resolver, networkId: network, encoding: sdk.Encoding.Borsh});
-  const handlers = {connect: [], disconnect: [], utxos: []};
+  const handlers = {connect: [], disconnect: [], utxos: [], chain: []};
   rpc.addEventListener('connect', () => handlers.connect.forEach(f => f()));
   rpc.addEventListener('disconnect', () => handlers.disconnect.forEach(f => f()));
   rpc.addEventListener('utxos-changed', e => handlers.utxos.forEach(f => f(e.data)));
+  // Selected-chain changes (subscribed WITHOUT accepted ids). Only the removed hashes are forwarded: normal additions
+  // (10/s) carry no reorg information and are dropped here without copying (2026-10-10 reorg fast path).
+  rpc.addEventListener('virtual-chain-changed', e => {
+    const removed = e?.data?.removedChainBlockHashes;
+    if (Array.isArray(removed) && removed.length && removed.length <= 10_000) { const r = removed.map(String); handlers.chain.forEach(f => f(r)); }
+  });
   const connecting = rpc.connect({blockAsyncConnect: true, strategy: strategy === 'fallback' ? sdk.ConnectStrategy.Fallback : sdk.ConnectStrategy.Retry,
     timeoutDuration: timeoutMs, retryInterval: 3000});
   let identity;
@@ -28,11 +34,12 @@ export async function openNode(sdk, {network = 'testnet-10', url = null, resolve
   log('CONNECTED', identity);
 
   const node = {
-    rpc, identity,
+    rpc, identity, url: url ?? null,      // url: lets a worker thread open its own connection to the same endpoint
     on(kind, fn) { handlers[kind].push(fn); },
     verify: async () => (node.identity = await verifyNode(rpc, network)),
     subscribeUtxosChanged: addrs => rpc.subscribeUtxosChanged(addrs),
     unsubscribeUtxosChanged: addrs => rpc.unsubscribeUtxosChanged(addrs),
+    subscribeVirtualChainChanged: () => rpc.subscribeVirtualChainChanged(false),
     getBlockDagInfo: () => rpc.getBlockDagInfo(),
     getSinkBlueScore: () => rpc.getSinkBlueScore(),
     getBlock: r => rpc.getBlock(r),

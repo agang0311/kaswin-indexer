@@ -91,7 +91,14 @@ export class Store {
       ON CONFLICT(id) DO UPDATE SET data=excluded.data,address=excluded.address,status=excluded.status,updated_at=excluded.updated_at`)
       .run(round.id, contract, enc(round), round.tip ? address : null, status, now);
   }
-  markLiveSeen(id, at) { this.db.prepare('UPDATE rounds SET live_seen_at=? WHERE id=?').run(at, id); }
+  markLiveSeen(id, at) { this.db.prepare('UPDATE rounds SET live_seen_at=? WHERE id=?').run(at, id); this.setMeta('tipSpent:' + id, null); }
+  /** The node showed this round's indexed tip as spent (event or reconcile) before the successor was resolved. Bound to
+   * that exact outpoint: it stops applying as soon as the round's tip changes, or is cleared when the tip is seen live. */
+  markTipSpent(id, tip, at) { if (!this.getMeta('tipSpent:' + id)) this.setMeta('tipSpent:' + id, {tip, at}); }
+  tipSpent(id, tip) {
+    const m = this.getMeta('tipSpent:' + id);
+    return m && tip && m.tip?.transactionId === tip.transactionId && m.tip?.index === tip.index ? m.at : null;
+  }
 
   /** The active (non-rolled-back) transition that already applied `txid` to `roundId`, if any. */
   activeTransition(roundId, txid) {
@@ -103,6 +110,11 @@ export class Store {
     this.db.prepare(`INSERT INTO transitions(txid,round_id,contract,seq,kind,status,accepting,accepting_daa,accepting_blue_score,containing,previous,next,evidence,observed_at)
       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(t.txid, t.roundId, t.contract, t.seq, t.kind, t.status, t.accepting, String(t.acceptingDaa),
       String(t.acceptingBlueScore), t.containing ?? null, t.previous ? enc(t.previous) : null, enc(t.next), enc(t.evidence), t.observedAt);
+  }
+  /** The newest non-rolled-back transition of a round (the one that produced its current state). */
+  latestActive(roundId) {
+    const r = this.db.prepare("SELECT * FROM transitions WHERE round_id=? AND status!='ROLLED_BACK' ORDER BY seq DESC LIMIT 1").get(roundId);
+    return r ? rowTransition(r) : null;
   }
   unfinalized() { return this.db.prepare("SELECT * FROM transitions WHERE status='ACCEPTED' ORDER BY round_id, seq").all().map(rowTransition); }
   transitions(roundId) { return this.db.prepare('SELECT * FROM transitions WHERE round_id=? ORDER BY seq').all(roundId).map(rowTransition); }

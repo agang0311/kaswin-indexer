@@ -20,9 +20,10 @@ export async function openDualNode({open, urls, log = () => {}, reconnectMs = [1
   pickReplacement = null, replaceAfter = 3}) {
   // pickReplacement({failedUrl, avoidP2pIds, avoidUrls}) -> url|null : pool mode. Without it the two URLs are fixed.
   if (!Array.isArray(urls) || urls.length !== 2 || urls[0] === urls[1]) throw Error('DUAL_NODE_NEEDS_TWO_DISTINCT_URLS');
-  const handlers = {connect: [], disconnect: [], utxos: [], failover: []};
+  const handlers = {connect: [], disconnect: [], utxos: [], failover: [], chain: []};
   const emit = (k, ...a) => handlers[k].forEach(f => { try { f(...a); } catch (e) { log('HANDLER_ERROR', k, String(e?.message ?? e)); } });
   const subs = new Set();
+  let chainSub = false;   // set by subscribeVirtualChainChanged(); re-applied on every (re)connect
   let closed = false;
   const members = urls.map((url, slot) => ({slot, url, node: null, up: false, attempts: 0, timer: null, gen: 0}));
   let active = null;
@@ -63,8 +64,14 @@ export async function openDualNode({open, urls, log = () => {}, reconnectMs = [1
         return false;
       }
       node.on('utxos', data => { if (m.node === node) emit('utxos', data, m.url); });
+      // Reorg hints from the ACTIVE member only (the standby may sit on a slightly different chain view).
+      node.on('chain', removed => { if (m.node === node && m === active) emit('chain', removed, m.url); });
       node.on('disconnect', () => { if (m.node === node) markDown(m, 'SOCKET_DISCONNECTED'); });
       if (subs.size) await withTimeout(node.subscribeUtxosChanged([...subs]), connectTimeoutMs, 'SUBSCRIBE');
+      if (chainSub && node.subscribeVirtualChainChanged) {
+        try { await withTimeout(node.subscribeVirtualChainChanged(), connectTimeoutMs, 'SUBSCRIBE_CHAIN'); }
+        catch (e) { log('CHAIN_SUBSCRIBE_FAILED', {url: m.url, message: String(e?.message ?? e)}); }   // periodic finality check still covers reorgs
+      }
       if (closed || gen !== m.gen) { try { await node.close(); } catch {} return false; }
       m.node = node; m.up = true; m.attempts = 0;
       log('NODE_UP', {url: m.url, identity: node.identity, subscriptions: subs.size});
@@ -138,6 +145,7 @@ export async function openDualNode({open, urls, log = () => {}, reconnectMs = [1
     verify: () => onActive('verify', n => n.verify()),
     subscribeUtxosChanged: async addrs => { addrs.forEach(a => subs.add(a)); await both('subscribeUtxosChanged', addrs); },
     unsubscribeUtxosChanged: async addrs => { addrs.forEach(a => subs.delete(a)); await both('unsubscribeUtxosChanged', addrs); },
+    subscribeVirtualChainChanged: async () => { chainSub = true; await both('subscribeVirtualChainChanged'); },
     close: async () => {
       closed = true;
       if (beat) clearRepeat(beat);

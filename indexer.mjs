@@ -81,6 +81,7 @@ else node = await openNode(sdk, {network, url: o.url ?? null, resolverUrls: o.re
 const engine = new Engine({store, contracts, node, addressOf: addressOfFactory(sdk, network), log,
   config: {network, finalityBlueScore: BigInt(o['finality-blue-score'])}});
 node.on('utxos', data => engine.onUtxosChanged(data));
+node.on('chain', removed => engine.onChainChanged(removed));
 
 if (cmd === 'track') {
   const [txid, start] = rest;
@@ -109,6 +110,8 @@ node.on('connect', () => engine.run('reconnect', async () => {
 // Dual mode: the standby was already subscribed; only close the gap of the switch moment (missed events -> reconcile).
 node.on('failover', info => { log('FAILOVER_RECONCILE', info); engine.run('reconcile', () => engine.reconcile()); engine.retryPending(); });
 await engine.start();
+// Reorg fast path: removed selected-chain blocks roll back affected transitions at once (periodic check stays as backstop).
+if (node.subscribeVirtualChainChanged) { try { await node.subscribeVirtualChainChanged(); engine.chainSubscribed = true; log('CHAIN_SUBSCRIBED', null); } catch (e) { log('CHAIN_SUBSCRIBE_FAILED', String(e?.message ?? e)); } }
 log('STARTED', {node: node.identity, live: store.rounds({liveOnly: true}).length, contracts: contracts.describe()});
 let api = null;
 if (o['api-port']) {
